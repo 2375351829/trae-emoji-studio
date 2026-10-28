@@ -1285,6 +1285,7 @@
     if (PROC_POSES[S.pose]) renderProcedural(ctx, s);
     renderStickers(ctx, s, ui);
     renderText(ctx, s);
+    if (ui) drawIkOverlay(ctx, s);   // 肢体手柄高亮只在预览层，导出不含
   }
 
   var stage = document.getElementById('stage');
@@ -2312,7 +2313,117 @@
       rigInputs[d[0]].val.textContent = Math.round(v) + '°';
     });
   }
-  // 画布交互：优先拖动贴纸；空白处拖动转身（仅手绘模型）
+  /* ---------------- 肢体拖拽 · IK 反解 ---------------- */
+  // 画布上直接拖手 / 脚：在屏幕空间做数值反解（粗网格 + 逐级细化），
+  // 解出的两角度直接写回 S.rig（与 13 个滑杆共用同一份状态，互相同步）；
+  // 拖头 = 朝向增量（headYaw / headPitch），不做位置反解。
+  var RAD = Math.PI / 180;
+  var ikDrag = null;    // 拖动中：{ def, offX, offY }
+  var ikHover = null;   // 悬停 / 抓取中的手柄（IK_DEFS 项）
+  var IK_ANCHOR = 0.02; // 反解惩罚项：同等命中时优先保留当前角度，避免拖动瞬间跳角
+
+  function torsoM(rig) {
+    return mMul(mT([0, rig.bounce || 0, 0]),
+      mMul(mRX((rig.bodyPitch || 0) * RAD),
+        mMul(mRY((rig.bodyYaw || 0) * RAD), mRZ((rig.bodyRoll || 0) * RAD))));
+  }
+  // 与 buildSkeleton 的 arm()/leg() 同构：T(关节) × RX(前后摆) × RZ(侧摆，按左右取符号)
+  function limbNodeM(rig, pos, front, side, sign) {
+    return mMul(torsoM(rig), mMul(mT(pos),
+      mMul(mRX(front * RAD), mRZ((sign < 0 ? side : -side) * RAD))));
+  }
+  function headNodeM(rig) {
+    return mMul(torsoM(rig), mMul(mT([0, GEO3D.headY, 0]),
+      mMul(mRX((rig.headPitch || 0) * RAD), mRY((rig.headYaw || 0) * RAD))));
+  }
+
+  // 顺序即拾取优先级（hitLimb 自后向前）：手 / 脚优先，头部最后，避免举手时抢走头部手柄
+  var IK_DEFS = [
+    { id: 'head', label: '头部', kind: 'head', keys: ['headYaw', 'headPitch'], r: 64 },
+    { id: 'handL', label: '左手', kind: 'arm', sign: -1, keys: ['lArmSide', 'lArmFront'], r: 40 },
+    { id: 'handR', label: '右手', kind: 'arm', sign: 1, keys: ['rArmSide', 'rArmFront'], r: 40 },
+    { id: 'footL', label: '左脚', kind: 'leg', sign: -1, keys: ['lLegSide', 'lLegFront'], r: 44 },
+    { id: 'footR', label: '右脚', kind: 'leg', sign: 1, keys: ['rLegSide', 'rLegFront'], r: 44 }
+  ];
+  function ikRange(key) {
+    for (var i = 0; i < RIG_DEFS.length; i++) if (RIG_DEFS[i][0] === key) return [RIG_DEFS[i][2], RIG_DEFS[i][3]];
+    return [-180, 180];
+  }
+  // 手柄位置（1024 基准画布坐标）
+  function ikPos(def, rig) {
+    rig = rig || S.rig || REST_RIG;
+    if (def.kind === 'arm') {
+      var am = limbNodeM(rig, [def.sign * GEO3D.shoulderX, GEO3D.shoulderY, 0],
+        rig[def.keys[1]] || 0, rig[def.keys[0]] || 0, def.sign);
+      return projectV(applyM(am, [0, GEO3D.armLen, 0]));
+    }
+    if (def.kind === 'leg') {
+      var lm = limbNodeM(rig, [def.sign * GEO3D.hipX, GEO3D.hipY, 0],
+        rig[def.keys[1]] || 0, rig[def.keys[0]] || 0, def.sign);
+      return projectV(applyM(lm, [0, GEO3D.legLen + 8, 10]));   // 脚掌盒中心（与 leg() 的 children 偏移一致）
+    }
+    var hm = headNodeM(rig);
+    return projectV(applyM(hm, [0, -GEO3D.headH / 2 + GEO3D.screenTopOff + GEO3D.screenH / 2,
+      GEO3D.headD / 2 + GEO3D.bezelProtrude]));   // 屏幕面中心
+  }
+  function hitLimb(cx, cy) {
+    var rig = S.rig || REST_RIG;
+    for (var i = IK_DEFS.length - 1; i >= 0; i--) {
+      var d = IK_DEFS[i], p = ikPos(d, rig);
+      if (Math.hypot(cx - p[0], cy - p[1]) <= d.r) return d;
+    }
+    return null;
+  }
+  // 两自由度屏幕空间反解：11×11 粗网格 + 7 轮 3×3 细化（约 180 次投影，单帧内可忽略）
+  function ikSolve(def, tx, ty) {
+    if (!S.rig) S.rig = rigClone(REST_RIG);
+    var rig = S.rig, kA = def.keys[0], kB = def.keys[1];
+    var rA = ikRange(kA), rB = ikRange(kB);
+    var a0 = rig[kA] || 0, b0 = rig[kB] || 0;
+    var bestA = a0, bestB = b0, bestD = Infinity;
+    function test(a, b) {
+      rig[kA] = a; rig[kB] = b;
+      var p = ikPos(def, rig);
+      var d = (p[0] - tx) * (p[0] - tx) + (p[1] - ty) * (p[1] - ty)
+        + IK_ANCHOR * ((a - a0) * (a - a0) + (b - b0) * (b - b0));
+      if (d < bestD - 1e-4) { bestD = d; bestA = a; bestB = b; }
+    }
+    test(a0, b0);   // 当前角度作为候选，保证「抓哪里就从哪里开始」，不会跳角
+    var NA = 10, NB = 10, i, j;
+    for (i = 0; i <= NA; i++) for (j = 0; j <= NB; j++)
+      test(rA[0] + (rA[1] - rA[0]) * i / NA, rB[0] + (rB[1] - rB[0]) * j / NB);
+    var spanA = (rA[1] - rA[0]) / NA, spanB = (rB[1] - rB[0]) / NB;
+    for (var it = 0; it < 7; it++) {
+      var ca = bestA, cb = bestB;
+      for (i = -1; i <= 1; i++) for (j = -1; j <= 1; j++) {
+        test(Math.max(rA[0], Math.min(rA[1], ca + i * spanA)),
+             Math.max(rB[0], Math.min(rB[1], cb + j * spanB)));
+      }
+      spanA *= 0.45; spanB *= 0.45;
+    }
+    rig[kA] = Math.max(rA[0], Math.min(rA[1], bestA));
+    rig[kB] = Math.max(rB[0], Math.min(rB[1], bestB));
+    return rig;
+  }
+  // 手柄高亮：只在预览层（ui=true）绘制，导出不含
+  function drawIkOverlay(ctx, s) {
+    var def = ikDrag ? ikDrag.def : ikHover;
+    if (!def) return;
+    var p = ikPos(def, S.rig || REST_RIG);
+    var k = s / BASE;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(159,247,228,.9)';
+    ctx.lineWidth = Math.max(1.6, 2.4 * k);
+    ctx.setLineDash([7 * k, 5 * k]);
+    ctx.beginPath(); ctx.arc(p[0] * k, p[1] * k, def.r * k, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(159,247,228,.95)';
+    ctx.beginPath(); ctx.arc(p[0] * k, p[1] * k, Math.max(1.4, 3 * k), 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // 画布交互：优先拖动贴纸 → 拖手 / 脚 / 头（IK）→ 空白处拖动转身
   (function drag() {
     var mode = null, lx = 0, ly = 0, offX = 0, offY = 0;
     function toCanvas(e) {
@@ -2346,6 +2457,18 @@
       }
       if (S.selSticker) selectSticker(null);
       if (!isProc()) { repaint(); return; }
+      var limb = hitLimb(p[0], p[1]);
+      if (limb) {
+        e.preventDefault();
+        if (!S.rig) S.rig = rigClone(REST_RIG);
+        var hp = ikPos(limb, S.rig);
+        ikDrag = { def: limb, offX: hp[0] - p[0], offY: hp[1] - p[1] };   // 抓取偏移，按下瞬间不跳
+        ikHover = limb;
+        mode = 'limb'; lx = e.clientX; ly = e.clientY;
+        stage.setPointerCapture(e.pointerId);
+        repaint();
+        return;
+      }
       mode = 'body'; lx = e.clientX; ly = e.clientY;
       stage.setPointerCapture(e.pointerId);
     });
@@ -2360,6 +2483,21 @@
         repaint();
         return;
       }
+      if (mode === 'limb') {
+        var d = ikDrag.def;
+        if (d.kind === 'head') {   // 头：朝向增量（与身体拖动同一套手感，夹在点头范围内）
+          if (!S.rig) S.rig = rigClone(REST_RIG);
+          S.rig.headYaw = clampNum((S.rig.headYaw || 0) + (e.clientX - lx) * 0.3, -40, 40);
+          S.rig.headPitch = clampNum((S.rig.headPitch || 0) + (e.clientY - ly) * 0.22, -25, 25);
+          lx = e.clientX; ly = e.clientY;
+        } else {
+          var q = toCanvas(e);
+          ikSolve(d, q[0] + ikDrag.offX, q[1] + ikDrag.offY);
+        }
+        syncRigUI();
+        repaint();
+        return;
+      }
       if (mode === 'body') {
         if (!S.rig) S.rig = rigClone(REST_RIG);
         S.rig.bodyYaw = Math.max(-50, Math.min(50, S.rig.bodyYaw + (e.clientX - lx) * 0.35));
@@ -2370,15 +2508,21 @@
         return;
       }
       var q = toCanvas(e);
-      stage.style.cursor = hitSticker(q[0], q[1]) ? 'move' : '';   // 悬停提示可拖动
+      var lim = isProc() ? hitLimb(q[0], q[1]) : null;
+      if ((lim ? lim.id : null) !== (ikHover && ikHover.id)) { ikHover = lim; repaint(); }   // 悬停目标变化才重绘
+      stage.style.cursor = hitSticker(q[0], q[1]) ? 'move' : (lim ? 'grab' : '');
     });
     ['pointerup', 'pointercancel'].forEach(function (t) {
       stage.addEventListener(t, function () {
         if (mode === 'sticker') saveStickersSoon();
+        if (mode === 'limb') { ikDrag = null; ikHover = null; syncRigUI(); repaint(); }
         mode = null;
       });
     });
-    stage.addEventListener('pointerleave', function () { stage.style.cursor = ''; });
+    stage.addEventListener('pointerleave', function () {
+      stage.style.cursor = '';
+      if (ikHover) { ikHover = null; repaint(); }
+    });
 
     // Delete / Esc：删除或取消选中贴纸（输入框内不拦截；两个画板弹窗打开时不响应）
     document.addEventListener('keydown', function (e) {
@@ -2569,7 +2713,7 @@
 
   /* ---------------- 启动 ---------------- */
   // 调试/高级用法句柄
-  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, dbg3d: { buildSkeleton: buildSkeleton, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
+  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, ik: { defs: IK_DEFS, pos: ikPos, solve: ikSolve, hit: hitLimb, state: function () { return { drag: ikDrag, hover: ikHover && ikHover.id }; } }, dbg3d: { buildSkeleton: buildSkeleton, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
   function init() {
     feBind();
     seBind();

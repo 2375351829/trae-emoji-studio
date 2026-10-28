@@ -68,7 +68,8 @@
 
     <div class="tab-body hidden" id="tab-rig">
       <h3 class="group-title">骨骼摆动 <small>实时驱动 3D 手绘模型（官方渲染姿势不适用）</small></h3>
-      <p class="rig-tip">💡 也可以直接在预览画布上<b>按住拖动</b>来转动身体；滑杆微调每个关节。</p>
+      <p class="rig-tip">💡 直接在预览画布上<b>拖动身体</b>可整体转身；<b>拖动手 / 脚 / 头</b>会按 IK 反解关节，
+        滑杆数值自动同步回填——滑杆与拖拽可任意混用。</p>
       <div class="rig-grid" id="rigSliders"></div>
       <button id="btnRigZero" class="btn ghost rig-zero" type="button">↺ 关节归零</button>
     </div>
@@ -280,6 +281,6 @@
 <div id="toast" class="toast" role="status"></div>
 
 <script src="js/assets.js?v=12"></script>
-<script src="js/app.js?v=14"></script>
+<script src="js/app.js?v=15"></script>
 </body>
 </html>
