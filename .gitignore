@@ -1,0 +1,8 @@
+# 本地临时产物（截图缓存 / 分享打包缓存），不入库
+.screenshots/
+.trae-html-share-packages/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini

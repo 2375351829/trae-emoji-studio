@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>五视图校验 · TRAE宝手绘模型 vs 角色五视图</title>
+<style>
+  body { margin: 0; background: #2b2f33; font: 12px/1.5 "Microsoft YaHei", sans-serif; color: #ddd; }
+  h2 { font-size: 13px; margin: 10px 0 4px; text-align: center; font-weight: 600; letter-spacing: .4px; color: #cfd8dc; }
+  .row { display: flex; gap: 12px; justify-content: center; align-items: flex-start; padding: 0 10px 14px; }
+  .cell { text-align: center; }
+  .cell canvas { display: block; background: #e8e8e8; }
+  .cap { font-size: 11px; color: #b9c2c8; margin-top: 3px; }
+  .head { font-size: 11px; color: #8fd8c8; }
+</style>
+</head>
+<body>
+<h2>统一按「头宽 = 240px」缩放，头顶点对齐 —— 红=模型叠影</h2>
+<div id="root"></div>
+<div id="err" style="color:#ff8080;font:12px monospace;padding:8px;white-space:pre-wrap"></div>
+<script>
+window.onerror = function (m, s, l, c, e) {
+  document.getElementById('err').textContent += '[ERR] ' + m + ' @' + l + ':' + c + '\n' + ((e && e.stack) || '') + '\n';
+};
+</script>
+<iframe id="app" src="../04-表情生成器-emoji-generator/index.html?v=12" style="position:absolute;left:-4000px;width:1200px;height:1200px;border:0"></iframe>
+<script>
+(function () {
+  var HEAD_W = 240;            // 统一头宽（像素）
+  var VIEWS = [
+    { label: '正面', yaw: 0,   pitch: 0,   src: '../02-角色五视图-turnaround/正面.png' },
+    { label: '左侧', yaw: 90,  pitch: 0,   src: '../02-角色五视图-turnaround/左侧.png' },
+    { label: '右侧', yaw: -90, pitch: 0,   src: '../02-角色五视图-turnaround/右侧.png' },
+    { label: '背面', yaw: 180, pitch: 0,   src: '../02-角色五视图-turnaround/背面.png' }
+  ];
+  var ifr = document.getElementById('app');
+  var W, A, rest = null;
+  ifr.addEventListener('load', function () {
+    W = ifr.contentWindow; A = W.__traeEmoji;
+    if (!A) { document.getElementById('err').textContent = 'app 未加载'; return; }
+    (function step(i) {
+      if (i >= VIEWS.length) { document.title = 'READY'; return; }
+      build(VIEWS[i], function () { step(i + 1); });
+    })(0);
+  });
+
+  function bboxOf(data, w, h, test) {
+    var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+      if (test(data, (y * w + x) * 4)) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    return x0 > x1 ? null : { x0: x0, x1: x1, y0: y0, y1: y1, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  }
+
+  // 以「头宽」为基准缩放：头宽 = 暗区最大行宽
+  function shot(src, sw, sh, box, headW) {
+    var k = HEAD_W / headW;
+    var cv = document.createElement('canvas');
+    cv.width = Math.round(box.w * k); cv.height = Math.round(box.h * k);
+    var c = cv.getContext('2d');
+    c.imageSmoothingEnabled = true;
+    c.scale(k, k);
+    c.drawImage(src, box.x0, box.y0, box.w, box.h, 0, 0, box.w, box.h);
+    return cv;
+  }
+
+  function rowOf(cols, text) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    var t = document.createElement('div');
+    t.style.cssText = 'writing-mode:vertical-rl;font-size:11px;color:#8fd8c8;align-self:center';
+    t.textContent = text;
+    row.appendChild(t);
+    cols.forEach(function (p) {
+      var cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.appendChild(p[0]);
+      var cap = document.createElement('div');
+      cap.className = 'cap'; cap.textContent = p[1];
+      cell.appendChild(cap);
+      row.appendChild(cell);
+    });
+    document.getElementById('root').appendChild(row);
+  }
+
+  function build(v, done) {
+    A.setPose('pstand'); A.setFace('normal'); A.setBg('none');
+    A.S.text.pos = 'none'; A.S.text.content = '';
+    A.S.stickers = {};
+    A.S.rig = { bodyYaw: v.yaw, bodyPitch: v.pitch, bodyRoll: 0, headYaw: 0, headPitch: 0,
+      lArmSide: 2, lArmFront: 10, lElbow: 0, rArmSide: 2, rArmFront: 10, rElbow: 0,
+      lLegFront: 0, lKnee: 0, rLegFront: 0, rKnee: 0, bounce: 0 };
+    A.repaint();
+    var stage = W.document.getElementById('stage');
+    var sw = stage.width, sh = stage.height;
+    var sdata = stage.getContext('2d').getImageData(0, 0, sw, sh).data;
+    // alpha>200 只取实体像素，避免把地面接触阴影算进轮廓
+    var solid = function (d, i) { return d[i + 3] > 200; };
+    var boxM = bboxOf(sdata, sw, sh, solid);
+    var headWM = maxRowWidth(sdata, sw, sh, solid);
+
+    var img = new Image();
+    img.onload = function () {
+      var tcv = document.createElement('canvas');
+      tcv.width = img.width; tcv.height = img.height;
+      var tc = tcv.getContext('2d');
+      tc.drawImage(img, 0, 0);
+      var tdata = tc.getImageData(0, 0, img.width, img.height).data;
+      var test = function (d, i) { return d[i] + d[i + 1] + d[i + 2] < 240 * 3; };
+      var boxT = bboxOf(tdata, img.width, img.height, test);
+      var headWT = maxRowWidth(tdata, img.width, img.height, test);
+
+      var modelCv = shot(stage, sw, sh, boxM, headWM);
+      var refCv = shot(tcv, img.width, img.height, boxT, headWT);
+
+      // 叠影：头顶点 + 头宽对齐，红=模型
+      var ow = Math.max(modelCv.width, refCv.width), oh = Math.max(modelCv.height, refCv.height);
+      var ov = document.createElement('canvas'); ov.width = ow; ov.height = oh;
+      var oc = ov.getContext('2d');
+      oc.fillStyle = '#ffffff'; oc.fillRect(0, 0, ow, oh);
+      oc.drawImage(refCv, (ow - refCv.width) / 2, 0);
+      var tint = document.createElement('canvas');
+      tint.width = modelCv.width; tint.height = modelCv.height;
+      var t2 = tint.getContext('2d');
+      t2.drawImage(modelCv, 0, 0);
+      t2.globalCompositeOperation = 'source-in';
+      t2.fillStyle = '#ff2d2d'; t2.fillRect(0, 0, tint.width, tint.height);
+      oc.globalAlpha = .5;
+      oc.drawImage(tint, (ow - modelCv.width) / 2, 0);
+
+      rowOf([[refCv, '五视图 ' + v.label], [modelCv, '模型 ' + v.label + ' (yaw ' + v.yaw + ')'], [ov, '叠影']],
+            v.label + '　比例：模型高/头宽 ' + (modelCv.height / HEAD_W).toFixed(2) +
+            ' ｜ 参考 ' + (refCv.height / HEAD_W).toFixed(2));
+      done();
+    };
+    img.src = v.src;
+  }
+
+  function maxRowWidth(data, w, h, test) {
+    var max = 0;
+    for (var y = 0; y < h; y++) {
+      var x0 = -1, x1 = -1;
+      for (var x = 0; x < w; x++) if (test(data, (y * w + x) * 4)) { if (x0 < 0) x0 = x; x1 = x; }
+      if (x1 - x0 + 1 > max) max = x1 - x0 + 1;
+    }
+    return max;
+  }
+})();
+</script>
+</body>
+</html>

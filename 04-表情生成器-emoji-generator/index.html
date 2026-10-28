@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>TRAE宝表情工厂 · 下一套官方表情包，由你来画</title>
+<meta name="description" content="基于 TRAE宝 官方形象的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23141719'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%239ff7e4'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%239ff7e4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">
+    <canvas id="logoCanvas" width="52" height="52" aria-hidden="true"></canvas>
+    <div class="brand-text">
+      <h1>TRAE宝表情工厂</h1>
+      <p>下一套官方表情包，由你来画 ｜ TRAE宝 Emoji Studio</p>
+    </div>
+  </div>
+  <nav class="header-actions">
+    <button id="btnRandom" class="btn ghost" type="button">🎲 随机灵感</button>
+    <button id="btnReset" class="btn ghost" type="button">↺ 重置</button>
+  </nav>
+</header>
+
+<main class="studio">
+  <!-- 左：预览区 -->
+  <section class="preview-panel" aria-label="预览">
+    <div class="canvas-holder">
+      <canvas id="stage" width="1024" height="1024"></canvas>
+      <div id="bgChecker" class="checker" aria-hidden="true"></div>
+    </div>
+    <div class="preview-toolbar">
+      <div class="export-group">
+        <select id="exportSize" aria-label="导出尺寸">
+          <option value="1024" selected>1024 × 1024</option>
+          <option value="720">720 × 720</option>
+          <option value="480">480 × 480</option>
+        </select>
+        <button id="btnDownload" class="btn primary" type="button">⬇ 下载表情</button>
+        <button id="btnCopy" class="btn" type="button">⧉ 复制图片</button>
+      </div>
+      <button id="btnBatch" class="btn ghost" type="button">📦 导出套系（8 张）</button>
+    </div>
+    <p class="preview-hint">小贴士：投稿建议「透明背景 + PNG + 1:1」，单张文案简短易读。</p>
+  </section>
+
+  <!-- 右：控制区 -->
+  <section class="controls-panel" aria-label="定制选项">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="pose" role="tab" type="button">姿势</button>
+      <button class="tab" data-tab="face" role="tab" type="button">表情</button>
+      <button class="tab" data-tab="rig" role="tab" type="button">骨骼</button>
+      <button class="tab" data-tab="bg" role="tab" type="button">背景</button>
+      <button class="tab" data-tab="text" role="tab" type="button">文字</button>
+      <button class="tab" data-tab="sticker" role="tab" type="button">贴纸</button>
+    </div>
+
+    <div class="tab-body" id="tab-pose">
+      <h3 class="group-title">姿势 <small>全部手绘 3D 模型，官方 PNG 仅作参考</small></h3>
+      <div class="option-grid" id="poseProc"></div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-face">
+      <h3 class="group-title">屏幕表情 <small>24 款内置像素表情，也可以自己画</small></h3>
+      <div class="option-grid" id="faceGrid"></div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-rig">
+      <h3 class="group-title">骨骼摆动 <small>实时驱动 3D 手绘模型（官方渲染姿势不适用）</small></h3>
+      <p class="rig-tip">💡 也可以直接在预览画布上<b>按住拖动</b>来转动身体；滑杆微调每个关节。</p>
+      <div class="rig-grid" id="rigSliders"></div>
+      <button id="btnRigZero" class="btn ghost rig-zero" type="button">↺ 关节归零</button>
+    </div>
+
+    <div class="tab-body hidden" id="tab-bg">
+      <h3 class="group-title">背景样式 <small>透明底可直接当表情包</small></h3>
+      <div class="option-grid" id="bgGrid"></div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-text">
+      <h3 class="group-title">文案</h3>
+      <div class="field">
+        <input id="textInput" type="text" maxlength="12" placeholder="输入文案，如：收到！" autocomplete="off">
+      </div>
+      <div class="chips" id="textPresets"></div>
+      <h3 class="group-title">位置</h3>
+      <div class="segment" id="textPos">
+        <button data-v="none" type="button">无</button>
+        <button data-v="top" type="button">上方</button>
+        <button data-v="bottom" class="active" type="button">下方</button>
+      </div>
+      <h3 class="group-title">样式</h3>
+      <div class="segment" id="textStyle">
+        <button data-v="meme" class="active" type="button">白字黑边</button>
+        <button data-v="neon" type="button">荧光发光</button>
+        <button data-v="bubble" type="button">气泡框</button>
+      </div>
+      <h3 class="group-title">颜色</h3>
+      <div class="swatches" id="textColor">
+        <button data-v="#ffffff" class="active" type="button" style="--c:#ffffff" aria-label="白"></button>
+        <button data-v="#1a1d20" type="button" style="--c:#1a1d20" aria-label="黑"></button>
+        <button data-v="#7fffe0" type="button" style="--c:#7fffe0" aria-label="青"></button>
+        <button data-v="#ffd75e" type="button" style="--c:#ffd75e" aria-label="黄"></button>
+        <button data-v="#ff9bd3" type="button" style="--c:#ff9bd3" aria-label="粉"></button>
+      </div>
+      <h3 class="group-title">大小</h3>
+      <input id="textSize" type="range" min="0.7" max="1.35" step="0.05" value="1">
+    </div>
+
+    <div class="tab-body hidden" id="tab-sticker">
+      <h3 class="group-title">氛围贴纸 <small>可与表情自带特效叠加</small></h3>
+      <div class="option-grid" id="stickerGrid"></div>
+    </div>
+
+    <h3 class="group-title preset-title">一键套系 <small>按官方示例场景配好全套</small></h3>
+    <div class="chips" id="presetChips"></div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <h3>形象参考 · 来自活动《TRAE宝表情包小赛》官方素材</h3>
+  <div class="gallery" id="gallery"></div>
+  <p class="foot-note">角色三特征：方形头部 · 屏幕表情 · 黑色机身 ｜ 本页为本地原型，图片仅在浏览器内处理，不上传任何数据。</p>
+</footer>
+
+<div id="faceEditor" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="feTitle">
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="feTitle">画一个新表情</h2>
+      <button id="feClose" class="btn ghost modal-close" type="button" aria-label="关闭">✕</button>
+    </header>
+    <div class="editor-grid">
+      <div class="editor-main">
+        <canvas id="feCanvas" width="560" height="392" aria-label="40 × 28 像素画板"></canvas>
+        <div class="fe-bar" id="feTools">
+          <button type="button" class="fe-tool active" data-tool="pen">✏️ 画笔</button>
+          <button type="button" class="fe-tool" data-tool="eraser">◻ 橡皮</button>
+          <button type="button" class="fe-tool" data-tool="fill">🪣 填充</button>
+          <span class="fe-sizes" id="feSize">
+            <button type="button" class="fe-size active" data-s="1">1px</button>
+            <button type="button" class="fe-size" data-s="2">2px</button>
+            <button type="button" class="fe-size" data-s="3">3px</button>
+          </span>
+          <label class="fe-check"><input type="checkbox" id="feMirror"> 左右对称</label>
+        </div>
+        <div class="fe-bar">
+          <div class="fe-colors" id="feColors"></div>
+        </div>
+        <div class="fe-bar">
+          <button id="feUndo" class="btn ghost" type="button">↶ 撤销</button>
+          <button id="feClear" class="btn ghost" type="button">清空</button>
+          <button id="feTpl" class="btn ghost" type="button">套用「平常心」底稿</button>
+        </div>
+      </div>
+      <aside class="editor-side">
+        <canvas id="fePreview" width="240" height="150" aria-label="表情实时预览"></canvas>
+        <label class="fe-field">名称
+          <input id="feName" maxlength="8" placeholder="我的表情" autocomplete="off">
+        </label>
+        <label class="fe-field">发光色
+          <select id="feGlow"></select>
+        </label>
+        <button id="feSave" class="btn primary" type="button">保存并使用</button>
+        <button id="feDelete" class="btn ghost hidden" type="button">删除这个表情</button>
+        <p class="fe-tip">画板 40 × 28 就是屏幕的真实像素；保存后存在本机浏览器，刷新/重开页面都还在。</p>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status"></div>
+
+<script src="js/assets.js?v=12"></script>
+<script src="js/app.js?v=12"></script>
+</body>
+</html>
