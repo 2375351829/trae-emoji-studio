@@ -289,6 +289,7 @@
     FACES.length = 0;
     BUILTIN_FACES.forEach(function (d) { FACES.push(d); });
     CUSTOM_FACES.forEach(function (r) { FACES.push(customDef(r)); });
+    fillAnimFace2();   // 表情列表变化（自定义增删）→ 同步「第二表情」下拉
   }
   function persistCustomFaces() {
     try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(CUSTOM_FACES)); return true; }
@@ -535,7 +536,7 @@
     });
   }
 
-  function renderProcedural(ctx, s, deviceScale, rigArg) {
+  function renderProcedural(ctx, s, deviceScale, rigArg, faceArg) {
     var rig = rigArg || S.rig || REST_RIG;
     var g = GEO3D, k = s / BASE;
     deviceScale = deviceScale || k;
@@ -618,7 +619,7 @@
     faces.sort(function (a, b) { return a.z - b.z; }); // 远（z 小）先画
     faces.forEach(function (f) {
       if (f.screen) {
-        applyFace(ctx, f.pts, { face: S.face, cover: true, coverColor: '#161b18', glowScale: NOGLOW ? 0 : deviceScale, persp: true });
+        applyFace(ctx, f.pts, { face: faceArg || S.face, cover: true, coverColor: '#161b18', glowScale: NOGLOW ? 0 : deviceScale, persp: true });
         ctx.save();
         ctx.beginPath();
         f.pts.forEach(function (p, i) { i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); });
@@ -726,8 +727,52 @@
     pose: 'pstand', face: 'normal', bg: 'none', rig: null,
     text: { content: '', pos: 'bottom', style: 'meme', color: '#ffffff', size: 1 },
     stickerItems: [], selSticker: null,          // 贴纸实例（数组顺序 = 层级顺序，由底到顶）
-    bgFit: 'cover', bgOffX: 0, bgOffY: 0   // 自定义背景：显示方式与位置微调（% of 画布）
+    bgFit: 'cover', bgOffX: 0, bgOffY: 0,   // 自定义背景：显示方式与位置微调（% of 画布）
+    anim: null                                    // 循环动画（v1.4.0）：见 ANIM_REST
   };
+
+  /* ---------------- 循环动画（v1.4.0） ---------------- */
+  var ANIM_KEY = 'traeEmoji.anim.v1';
+  var ANIM_REST = { playing: true, breath: 6, sway: 3, walk: 10, switchOn: false, face2: 'wink', period: 1.6 };
+  function animClone(a) {
+    var o = {}, k;   // 以默认值为底，避免旧存档缺字段
+    for (k in ANIM_REST) o[k] = (a && a[k] !== undefined) ? a[k] : ANIM_REST[k];
+    return o;
+  }
+  S.anim = animClone();
+  function animActive() {   // 是否有可播放的动画内容且处于播放状态
+    var a = S.anim;
+    return !!(a.playing && (a.breath > 0 || a.sway > 0 || a.walk > 0 || a.switchOn));
+  }
+  // t ∈ [0,1) 为循环相位：在用户骨骼基础上叠加动画偏移（不污染 S.rig）
+  function effectiveRig(t) {
+    var rig = rigClone(S.rig || REST_RIG);
+    if (t == null) return rig;
+    var a = S.anim, s = Math.sin(t * Math.PI * 2);
+    if (a.breath > 0) rig.bounce = (rig.bounce || 0) + a.breath * s;      // 呼吸：身体上下起伏
+    if (a.sway > 0) rig.bodyYaw = (rig.bodyYaw || 0) + a.sway * s;        // 摇摆：绕身体中轴左右转，中心点不动
+    if (a.walk > 0) {                                                      // 走路式四肢交叉摆动（左臂↔右腿、右臂↔左腿）
+      rig.lArmFront = (rig.lArmFront || 0) + a.walk * s;
+      rig.rArmFront = (rig.rArmFront || 0) - a.walk * s;
+      rig.lLegFront = (rig.lLegFront || 0) - a.walk * .8 * s;
+      rig.rLegFront = (rig.rLegFront || 0) + a.walk * .8 * s;
+    }
+    return rig;
+  }
+  // 表情切换：周期末 10% 短促闪现第二表情（默认眨眼，约 160ms），其余时间为主表情
+  function effectiveFace(t) {
+    if (t == null || !S.anim.switchOn) return S.face;
+    return t >= 0.9 ? S.anim.face2 : S.face;
+  }
+  function loadAnim() {
+    try {
+      var raw = localStorage.getItem(ANIM_KEY);
+      if (raw) S.anim = animClone(JSON.parse(raw));
+    } catch (e) { /* 存储不可用则用默认值 */ }
+  }
+  function saveAnim() {
+    try { localStorage.setItem(ANIM_KEY, JSON.stringify(S.anim)); } catch (e) { }
+  }
 
   /* ---------------- 资源加载 ---------------- */
   var faceCache = {};     // 表情位图缓存
@@ -1278,11 +1323,15 @@
 
   /* ---------------- 总渲染 ---------------- */
   // ui = true 时额外绘制「贴纸选中框」（仅预览用，导出传 false）
-  function render(ctx, s, ui) {
+  // t ∈ [0,1) 为动画相位（v1.4.0）：不传则按当前静态状态渲染（PNG 导出用）
+  function render(ctx, s, ui, t) {
     ctx.clearRect(0, 0, s, s);
     renderBg(ctx, S.bg, s);
     // 全部姿势均走手绘 3D 管线，官方 PNG 仅作底部参考，不进入生成
-    if (PROC_POSES[S.pose]) renderProcedural(ctx, s);
+    if (PROC_POSES[S.pose]) {
+      var rig = (t == null) ? (S.rig || REST_RIG) : effectiveRig(t);
+      renderProcedural(ctx, s, undefined, rig, t == null ? null : effectiveFace(t));
+    }
     renderStickers(ctx, s, ui);
     renderText(ctx, s);
     if (ui) drawIkOverlay(ctx, s);   // 肢体手柄高亮只在预览层，导出不含
@@ -1290,9 +1339,25 @@
 
   var stage = document.getElementById('stage');
   var stageCtx = stage.getContext('2d');
+  /* ---------------- 预览动画循环（v1.4.0） ---------------- */
+  var animRAF = 0;
+  function animPhase() {
+    return (performance.now() / 1000 % S.anim.period) / S.anim.period;
+  }
+  function animLoop() {
+    animRAF = 0;
+    if (!animActive()) return;
+    render(stageCtx, BASE, true, animPhase());
+    animRAF = requestAnimationFrame(animLoop);
+  }
   function repaint() {
     document.getElementById('bgChecker').classList.toggle('show', S.bg === 'none');
-    render(stageCtx, BASE, true);
+    if (animActive()) {
+      if (!animRAF) animRAF = requestAnimationFrame(animLoop);   // 循环帧里自绘
+    } else {
+      if (animRAF) { cancelAnimationFrame(animRAF); animRAF = 0; }
+      render(stageCtx, BASE, true);
+    }
   }
 
   /* ---------------- 缩略图 ---------------- */
@@ -2575,6 +2640,7 @@
     setTextPos('bottom'); setTextStyle('meme');
     setActive(document.getElementById('textColor'), '#ffffff');
     setPose(S.pose); setFace(S.face); setBg(S.bg);
+    S.anim = animClone(); syncAnimUI();
     stickerChanged();
   };
   document.getElementById('btnRandom').onclick = function () {
@@ -2604,6 +2670,78 @@
     }
     stickerChanged();
   };
+
+  /* ---------------- 动画面板（v1.4.0） ---------------- */
+  var animEl = {};
+  // 填充「第二表情」下拉；列表变化（自定义表情增删）时由 rebuildFaces 回调
+  function fillAnimFace2() {
+    var sel = animEl && animEl.face2;   // 模块加载早期（rebuildFaces）可能先于此执行，animEl/S.anim 尚未初始化
+    if (!sel || !S.anim) return;
+    var keep = S.anim.face2;
+    sel.innerHTML = '';
+    FACES.forEach(function (f) {
+      var o = document.createElement('option');
+      o.value = f.id; o.textContent = f.label;
+      sel.appendChild(o);
+    });
+    var ok = FACES.some(function (f) { return f.id === keep; });
+    if (!ok) keep = FACES.some(function (f) { return f.id === 'wink'; }) ? 'wink' : FACES[0].id;
+    S.anim.face2 = keep;
+    sel.value = keep;
+  }
+  function syncAnimUI() {
+    var a = S.anim;
+    if (!animEl.play) return;
+    var has = a.breath > 0 || a.sway > 0 || a.walk > 0 || a.switchOn;
+    animEl.play.textContent = a.playing ? '⏸ 暂停预览' : '▶ 播放预览';
+    animEl.status.textContent = !has ? '未启用：调一个滑杆即可开始'
+      : (a.playing ? '循环播放中' : '已暂停（导出 GIF 不受影响）');
+    animEl.breath.value = a.breath;
+    animEl.breathVal.textContent = a.breath > 0 ? String(a.breath) : '关';
+    animEl.sway.value = a.sway;
+    animEl.swayVal.textContent = a.sway > 0 ? a.sway + '°' : '关';
+    animEl.walk.value = a.walk;
+    animEl.walkVal.textContent = a.walk > 0 ? a.walk + '°' : '关';
+    animEl.period.value = a.period;
+    animEl.periodVal.textContent = a.period.toFixed(1) + 's';
+    animEl.switchOn.checked = !!a.switchOn;
+    if (animEl.face2.value !== a.face2) animEl.face2.value = a.face2;
+  }
+  function buildAnimUI() {
+    animEl.play = document.getElementById('animPlay');
+    animEl.status = document.getElementById('animStatus');
+    animEl.breath = document.getElementById('animBreath');
+    animEl.breathVal = document.getElementById('animBreathVal');
+    animEl.sway = document.getElementById('animSway');
+    animEl.swayVal = document.getElementById('animSwayVal');
+    animEl.walk = document.getElementById('animWalk');
+    animEl.walkVal = document.getElementById('animWalkVal');
+    animEl.period = document.getElementById('animPeriod');
+    animEl.periodVal = document.getElementById('animPeriodVal');
+    animEl.switchOn = document.getElementById('animSwitch');
+    animEl.face2 = document.getElementById('animFace2');
+    fillAnimFace2();
+    animEl.play.onclick = function () {
+      S.anim.playing = !S.anim.playing;
+      saveAnim(); syncAnimUI(); repaint();
+    };
+    function bind(input, fn) {
+      input.addEventListener('input', function () {
+        fn(input.type === 'checkbox' ? input.checked : parseFloat(input.value));
+        saveAnim(); syncAnimUI(); repaint();
+      });
+    }
+    bind(animEl.breath, function (v) { S.anim.breath = Math.round(v); });
+    bind(animEl.sway, function (v) { S.anim.sway = Math.round(v); });
+    bind(animEl.walk, function (v) { S.anim.walk = Math.round(v); });
+    bind(animEl.period, function (v) { S.anim.period = v; });
+    bind(animEl.switchOn, function (v) { S.anim.switchOn = !!v; });
+    animEl.face2.addEventListener('change', function () {
+      S.anim.face2 = animEl.face2.value;
+      saveAnim(); repaint();
+    });
+    syncAnimUI();
+  }
 
   /* ---------------- 导出 ---------------- */
   function toast(msg) {
@@ -2675,6 +2813,49 @@
     next();
   };
 
+  /* ---------------- GIF 动图导出（v1.4.0） ---------------- */
+  var GIF_FRAMES = 16;
+  document.getElementById('btnGif').onclick = function () {
+    var a = S.anim;
+    if (!(a.breath > 0 || a.sway > 0 || a.walk > 0 || a.switchOn)) {
+      toast('请先在「动画」页打开呼吸、摇摆、四肢摆动或表情切换');
+      return;
+    }
+    if (!window.TraeGif) { toast('GIF 编码器未加载，请检查 js/gif-encoder.js'); return; }
+    var btn = this;
+    var size = parseInt(document.getElementById('exportSize').value, 10);
+    var delayMs = Math.max(20, Math.round(a.period * 1000 / GIF_FRAMES / 10) * 10);
+    btn.disabled = true;
+    toast('正在采集 ' + GIF_FRAMES + ' 帧动画…');
+    setTimeout(function () {
+      try {
+        // 均匀采样一个循环周期；离屏渲染不经过预览层（无选中框、无手柄）
+        var frames = [];
+        for (var i = 0; i < GIF_FRAMES; i++) {
+          var cv = document.createElement('canvas');
+          cv.width = cv.height = size;
+          var c2 = cv.getContext('2d');
+          render(c2, size, false, i / GIF_FRAMES);
+          frames.push({ data: c2.getImageData(0, 0, size, size).data });
+        }
+        window.TraeGif.encode({
+          width: size, height: size, delayMs: delayMs, frames: frames,
+          onProgress: function (p) { toast('GIF 编码中… ' + Math.round(p * 100) + '%'); }
+        }).then(function (blob) {
+          btn.disabled = false;
+          download(blob, 'TRAE宝-动画-' + S.pose + '-' + S.face + '.gif');
+          toast('GIF 已导出（' + GIF_FRAMES + ' 帧 · ' + Math.round(blob.size / 1024) + 'KB）');
+        }).catch(function () {
+          btn.disabled = false;
+          toast('GIF 编码失败，请重试');
+        });
+      } catch (err) {
+        btn.disabled = false;
+        toast('GIF 导出失败：' + (err && err.message || err));
+      }
+    }, 30);
+  };
+
   function restoreState(st) {
     S.pose = st.pose; S.face = st.face; S.bg = st.bg;
     S.text = JSON.parse(JSON.stringify(st.text));
@@ -2727,6 +2908,8 @@
     bindBgUI();
     syncBgUI();
     loadCustomBg();
+    loadAnim();        // v1.4.0：恢复本机保存的动画设置
+    buildAnimUI();
     repaint();
   }
   init();

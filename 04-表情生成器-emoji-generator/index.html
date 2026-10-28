@@ -41,6 +41,7 @@
         <button id="btnCopy" class="btn" type="button">⧉ 复制图片</button>
       </div>
       <button id="btnBatch" class="btn ghost" type="button">📦 导出套系（8 张）</button>
+      <button id="btnGif" class="btn ghost" type="button">🎬 导出 GIF</button>
     </div>
     <p class="preview-hint">小贴士：投稿建议「透明背景 + PNG + 1:1」，单张文案简短易读。</p>
   </section>
@@ -54,6 +55,7 @@
       <button class="tab" data-tab="bg" role="tab" type="button">背景</button>
       <button class="tab" data-tab="text" role="tab" type="button">文字</button>
       <button class="tab" data-tab="sticker" role="tab" type="button">贴纸</button>
+      <button class="tab" data-tab="anim" role="tab" type="button">动画</button>
     </div>
 
     <div class="tab-body" id="tab-pose">
@@ -182,6 +184,39 @@
       </div>
     </div>
 
+    <div class="tab-body hidden" id="tab-anim">
+      <h3 class="group-title">循环动画 <small>预览与 GIF 导出共用同一套动画</small></h3>
+      <div class="anim-head">
+        <button id="animPlay" class="btn" type="button">⏸ 暂停预览</button>
+        <span id="animStatus" class="anim-status">循环播放中</span>
+      </div>
+      <div class="rig-grid">
+        <div class="rig-item">
+          <label><span>呼吸起伏</span><b id="animBreathVal">6</b></label>
+          <input id="animBreath" type="range" min="0" max="16" step="1" value="6">
+        </div>
+        <div class="rig-item">
+          <label><span>左右摇摆（原地转身）</span><b id="animSwayVal">3°</b></label>
+          <input id="animSway" type="range" min="0" max="12" step="1" value="3">
+        </div>
+        <div class="rig-item">
+          <label><span>四肢摆动（走路式）</span><b id="animWalkVal">10°</b></label>
+          <input id="animWalk" type="range" min="0" max="20" step="1" value="10">
+        </div>
+        <div class="rig-item">
+          <label><span>循环周期</span><b id="animPeriodVal">1.6s</b></label>
+          <input id="animPeriod" type="range" min="0.8" max="3.2" step="0.2" value="1.6">
+        </div>
+      </div>
+
+      <h3 class="group-title">眨眼 / 表情闪现 <small>每个周期末短促闪一下第二表情，像眨眼一样自然</small></h3>
+      <label class="fe-check anim-switch"><input type="checkbox" id="animSwitch"> 启用眨眼闪现</label>
+      <div class="field">
+        <select id="animFace2" aria-label="第二表情"></select>
+      </div>
+      <p class="fe-tip">导出 GIF：16 帧无限循环，帧率按周期自动换算；建议选 480 尺寸，文件更小、聊天里更流畅。PNG 导出的始终是静态姿势，不受动画影响。</p>
+    </div>
+
     <h3 class="group-title preset-title">一键套系 <small>按官方示例场景配好全套</small></h3>
     <div class="chips" id="presetChips"></div>
   </section>
@@ -281,6 +316,7 @@
 <div id="toast" class="toast" role="status"></div>
 
 <script src="js/assets.js?v=12"></script>
-<script src="js/app.js?v=15"></script>
+<script src="js/gif-encoder.js?v=1"></script>
+<script src="js/app.js?v=19"></script>
 </body>
 </html>
