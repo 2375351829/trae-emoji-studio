@@ -673,17 +673,38 @@
     { id: 'night', label: '星空' }
   ];
 
-  /* ---------------- 贴纸（全局氛围特效） ---------------- */
+  /* ---------------- 贴纸（可自由摆放的图层） ---------------- */
+  // 定义字段：u = 1024 基准下每格像素、r = 半径（格）、col = 辉光色、draw(p, k) 以原点为心绘制
   var STICKERS = [
-    { id: 'sweat', label: '汗滴' },
-    { id: 'anger', label: '怒气' },
-    { id: 'zzz', label: 'Zzz' },
-    { id: 'sparkle', label: '星光' },
-    { id: 'hearts', label: '爱心' },
-    { id: 'notes', label: '音符' },
-    { id: 'bulb', label: '灯泡' },
-    { id: 'qmark', label: '问号' }
+    { id: 'sweat', label: '汗滴', col: C.blue, u: 26, r: 3.2, draw: function (p, k) { p.drop(0, 0, k); } },
+    { id: 'anger', label: '怒气', col: C.red, u: 16, r: 5.2, draw: function (p, k) { p.anger(-2.25 * k, 0, k); } },
+    { id: 'zzz', label: 'Zzz', col: C.cyan, u: 30, r: 3.1, draw: function (p, k) { p.zzz(0, 0, k); } },
+    { id: 'sparkle', label: '星光', col: C.gold, u: 30, r: 2.9, draw: function (p, k) {
+        [[0, 0, 1.5], [1.15, -1.35, .95], [-1.25, -1.7, .62]].forEach(function (q) {
+          var x = q[0] * k, y = q[1] * k, r = q[2] * k;
+          p.px(x - r, y - r * .18, r * 2, r * .36);
+          p.px(x - r * .18, y - r, r * .36, r * 2);
+        });
+      } },
+    { id: 'hearts', label: '爱心', col: C.pink, u: 10, r: 10.5, draw: function (p, k) {
+        p.heart(-7 * k, 2 * k, k); p.heart(3 * k, -2 * k, .8 * k); p.heart(9 * k, 3 * k, .6 * k);
+      } },
+    { id: 'notes', label: '音符', col: C.cyan, u: 24, r: 3.8, draw: function (p, k) {
+        drawPat(p, ['####..#', '####..#', '####..#', '...#..#', '.###.##'], 0, 0, k);
+      } },
+    { id: 'bulb', label: '灯泡', col: C.gold, u: 26, r: 3.1, draw: function (p, k) {
+        drawPat(p, ['.###.', '#...#', '#...#', '.###.', '..#..', '.###.'], 0, 0, k);
+      } },
+    { id: 'qmark', label: '问号', col: C.gold, u: 26, r: 3.1, draw: function (p, k) { p.qmark(0, 0, k); } }
   ];
+  // 旧版固定位 → 实例化后的默认落点（1024 基准坐标）；一键套系沿用这些落点
+  var STICKER_HOME = { sweat: [830, 210], anger: [820, 190], zzz: [830, 170], sparkle: [180, 200], hearts: [190, 210], notes: [830, 200], bulb: [830, 190], qmark: [840, 200] };
+  var ST_IMG_BASE = 240;        // 图片贴纸在 1024 基准下的最长边
+  var ST_IMG_MAX = 512;         // 上传图片归一化后的最长边
+  var ST_MAX = 12;              // 画布贴纸上限
+  var ST_KEY = 'traeEmoji.stickers.v1';
+
+  function findSticker(id) { return STICKERS.find(function (s) { return s.id === id; }); }
 
   /* ---------------- 文案预设与套系 ---------------- */
   var TEXT_PRESETS = ['爱你哟', '收到', '加油鸭', '让我想想', '我看好你哟', '不愧是你',
@@ -704,9 +725,9 @@
   var S = {
     pose: 'pstand', face: 'normal', bg: 'none', rig: null,
     text: { content: '', pos: 'bottom', style: 'meme', color: '#ffffff', size: 1 },
-    stickers: {}
+    stickerItems: [], selSticker: null,          // 贴纸实例（数组顺序 = 层级顺序，由底到顶）
+    bgFit: 'cover', bgOffX: 0, bgOffY: 0   // 自定义背景：显示方式与位置微调（% of 画布）
   };
-  STICKERS.forEach(function (s) { S.stickers[s.id] = false; });
 
   /* ---------------- 资源加载 ---------------- */
   var faceCache = {};     // 表情位图缓存
@@ -834,8 +855,211 @@
     ctx.restore();
   }
 
+  /* ---------------- 自定义背景（本地上传图片） ---------------- */
+  // 存储结构：{ name, data: dataURL, fit, offX, offY }；图片归一化到最长边 1024（对齐最高导出档）
+  var BG_KEY = 'traeEmoji.customBg.v1';
+  var BG_MAX = 1024, BG_OFF_MAX = 30;
+  var bgImg = null;        // 当前背景图（归一化后的 canvas / Image）
+  var bgData = null;       // 归一化图的 dataURL（持久化用）
+  var bgName = '';
+  var bgCustomTile = null;
+  var bgEl = {};
+
+  function clampOff(v) { v = Math.round(+v || 0); return Math.max(-BG_OFF_MAX, Math.min(BG_OFF_MAX, v)); }
+
+  function drawCustomBg(ctx, s) {
+    if (!bgImg) return;                        // 还没选图：保持透明
+    var w = bgImg.naturalWidth || bgImg.width, h = bgImg.naturalHeight || bgImg.height;
+    if (!w || !h) return;
+    var k = s / BASE;
+    var mode = S.bgFit || 'cover';
+    var ox = S.bgOffX * s / 100, oy = S.bgOffY * s / 100;
+    ctx.save();
+    if (mode === 'tile') {
+      // 平铺：原图尺寸重复；偏移与缩放都跟随画布比例，各导出尺寸构图一致
+      var pat = ctx.createPattern(bgImg, 'repeat');
+      if (!pat) { ctx.restore(); return; }
+      ctx.scale(k, k);
+      ctx.translate(ox / k, oy / k);
+      ctx.fillStyle = pat;
+      ctx.fillRect(-ox / k, -oy / k, s / k, s / k);
+      ctx.restore();
+      return;
+    }
+    var sc = (mode === 'contain' ? Math.min : Math.max)(s / w, s / h);
+    var dw = w * sc, dh = h * sc;
+    ctx.imageSmoothingEnabled = true;
+    if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bgImg, (s - dw) / 2 + ox, (s - dh) / 2 + oy, dw, dh);
+    ctx.restore();
+  }
+
+  function hasAlphaPixels(c, w, h) {
+    var d = c.getImageData(0, 0, w, h).data;
+    for (var i = 3; i < d.length; i += 4) if (d[i] < 250) return true;
+    return false;
+  }
+
+  function applyBgFile(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { toast('请选择图片文件（JPG / PNG / WebP）'); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var raw = new Image();
+      raw.onload = function () {
+        var sc = Math.min(1, BG_MAX / Math.max(raw.naturalWidth, raw.naturalHeight));
+        var cw = Math.max(1, Math.round(raw.naturalWidth * sc));
+        var ch = Math.max(1, Math.round(raw.naturalHeight * sc));
+        var cv = document.createElement('canvas');
+        cv.width = cw; cv.height = ch;
+        var c = cv.getContext('2d');
+        c.drawImage(raw, 0, 0, cw, ch);
+        bgImg = cv;
+        bgName = file.name;
+        S.bgFit = 'cover'; S.bgOffX = 0; S.bgOffY = 0;
+        var data = null;
+        try {
+          // 带透明像素的图存 PNG，普通照片存 JPEG（体积小，避免撑爆 localStorage）
+          data = cv.toDataURL(hasAlphaPixels(c, cw, ch) ? 'image/png' : 'image/jpeg', .9);
+        } catch (e) { data = null; }
+        setBg('custom');
+        syncBgUI();
+        refreshCustomBgTile();
+        var ok = data ? saveBg(data) : false;
+        toast(ok ? '已应用背景「' + bgName + '」' : '已应用背景「' + bgName + '」（本机存储不可用，刷新后需重新选择）');
+      };
+      raw.onerror = function () { toast('这张图片打不开，换一张试试'); };
+      raw.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function saveBg(dataArg) {
+    if (dataArg) bgData = dataArg;
+    if (!bgData) return false;
+    try {
+      localStorage.setItem(BG_KEY, JSON.stringify({
+        name: bgName, data: bgData, fit: S.bgFit, offX: S.bgOffX, offY: S.bgOffY
+      }));
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function loadCustomBg() {
+    var rec;
+    try { rec = JSON.parse(localStorage.getItem(BG_KEY) || 'null'); } catch (e) { rec = null; }
+    if (!rec || typeof rec.data !== 'string') return;
+    var img = new Image();
+    img.onload = function () {
+      bgImg = img;
+      bgData = rec.data;
+      bgName = rec.name || '';
+      S.bgFit = (rec.fit === 'contain' || rec.fit === 'tile') ? rec.fit : 'cover';
+      S.bgOffX = clampOff(rec.offX);
+      S.bgOffY = clampOff(rec.offY);
+      syncBgUI();
+      refreshCustomBgTile();
+    };
+    img.onerror = function () {
+      try { localStorage.removeItem(BG_KEY); } catch (e) {}
+    };
+    img.src = rec.data;
+  }
+
+  function openBgPicker() {
+    if (!bgEl.file) return;
+    bgEl.file.value = '';   // 允许重复选同一张图
+    bgEl.file.click();
+  }
+
+  function clearCustomBg() {
+    if (!bgImg) return;
+    if (!window.confirm('移除自定义背景「' + (bgName || '自定义图片') + '」？图片只存在本机浏览器，移除后需重新选择。')) return;
+    bgImg = null; bgData = null; bgName = '';
+    try { localStorage.removeItem(BG_KEY); } catch (e) {}
+    if (S.bg === 'custom') setBg('none');
+    syncBgUI(); refreshCustomBgTile(); repaint();
+    toast('已移除自定义背景');
+  }
+
+  function buildCustomBgThumb() {
+    var cv = thumbCanvas(120), c = cv.getContext('2d');
+    if (!bgImg) {                        // 未选图：显示加号入口
+      c.save();
+      c.strokeStyle = C.cyan; c.lineWidth = 6; c.lineCap = 'round';
+      c.shadowColor = C.cyan; c.shadowBlur = 10;
+      c.beginPath(); c.moveTo(60, 38); c.lineTo(60, 82); c.moveTo(38, 60); c.lineTo(82, 60); c.stroke();
+      c.restore();
+      return cv;
+    }
+    var w = bgImg.naturalWidth || bgImg.width, h = bgImg.naturalHeight || bgImg.height;
+    var sc = Math.max(120 / w, 120 / h);
+    c.imageSmoothingEnabled = true;
+    c.drawImage(bgImg, (120 - w * sc) / 2, (120 - h * sc) / 2, w * sc, h * sc);
+    return cv;
+  }
+
+  function refreshCustomBgTile() {
+    if (!bgCustomTile) return;
+    var old = bgCustomTile.querySelector('canvas');
+    var cv = buildCustomBgThumb();
+    if (old) bgCustomTile.replaceChild(cv, old);
+    else bgCustomTile.insertBefore(cv, bgCustomTile.firstChild);
+  }
+
+  function syncBgUI() {
+    if (!bgEl.name) return;
+    bgEl.name.textContent = bgImg ? (bgName || '自定义图片') : '未选择图片';
+    bgEl.pick.textContent = bgImg ? '🖼 更换图片' : '🖼 选择图片';
+    bgEl.clear.classList.toggle('hidden', !bgImg);
+    bgEl.adjust.classList.toggle('hidden', !bgImg);
+    setActive(bgEl.fit, S.bgFit);
+    bgEl.offX.value = S.bgOffX;
+    bgEl.offY.value = S.bgOffY;
+    bgEl.offXVal.textContent = S.bgOffX + '%';
+    bgEl.offYVal.textContent = S.bgOffY + '%';
+  }
+
+  function bindBgUI() {
+    bgEl.pick = document.getElementById('bgPick');
+    bgEl.file = document.getElementById('bgFile');
+    bgEl.clear = document.getElementById('bgClear');
+    bgEl.name = document.getElementById('bgName');
+    bgEl.adjust = document.getElementById('bgAdjust');
+    bgEl.fit = document.getElementById('bgFit');
+    bgEl.offX = document.getElementById('bgOffX');
+    bgEl.offY = document.getElementById('bgOffY');
+    bgEl.offXVal = document.getElementById('bgOffXVal');
+    bgEl.offYVal = document.getElementById('bgOffYVal');
+
+    bgEl.pick.onclick = openBgPicker;
+    bgEl.file.onchange = function () {
+      var f = bgEl.file.files && bgEl.file.files[0];
+      if (f) applyBgFile(f);
+    };
+    bgEl.clear.onclick = clearCustomBg;
+    [].forEach.call(bgEl.fit.children, function (b) {
+      b.onclick = function () {
+        S.bgFit = b.dataset.v;
+        if (bgImg && S.bg !== 'custom') setBg('custom'); else repaint();
+        syncBgUI();
+        saveBg();
+      };
+    });
+    [['offX', 'bgOffX'], ['offY', 'bgOffY']].forEach(function (pair) {
+      var input = bgEl[pair[0]], out = bgEl[pair[0] + 'Val'];
+      input.addEventListener('input', function () {
+        S[pair[1]] = clampOff(input.value);
+        out.textContent = S[pair[1]] + '%';
+        if (bgImg && S.bg !== 'custom') setBg('custom'); else repaint();
+      });
+      input.addEventListener('change', function () { saveBg(); });
+    });
+  }
+
   /* ---------------- 背景渲染 ---------------- */
   function renderBg(ctx, id, s) {
+    if (id === 'custom') { drawCustomBg(ctx, s); return; }
     if (id === 'none') return;
     function grad(c1, c2) { var g = ctx.createLinearGradient(0, 0, 0, s); g.addColorStop(0, c1); g.addColorStop(1, c2); return g; }
     switch (id) {
@@ -904,42 +1128,94 @@
     };
   }
 
-  /* ---------------- 贴纸 ---------------- */
-  function renderStickers(ctx, s) {
+  /* ---------------- 贴纸（实例渲染：位置 / 缩放 / 旋转 / 层级） ---------------- */
+  function stickerRadiusUnit(it) {
+    var sc = it.scale || 1;
+    if (it.t === 'img') return (ST_IMG_BASE / 2) * sc;
+    var def = findSticker(it.ref);
+    return def ? def.r * def.u * sc : 60 * sc;
+  }
+
+  // unit = 1 个 1024 基准像素在当前画布尺寸下的倍数；调用前需已 translate 到实例中心
+  function drawStickerCore(ctx, it, unit) {
+    var sc = it.scale || 1;
+    if (it.t === 'img') {
+      var img = it.img;
+      if (!img) return;
+      var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+      if (!w || !h) return;
+      var side = ST_IMG_BASE * sc * unit;
+      var dw = w >= h ? side : side * w / h;
+      var dh = w >= h ? side * h / w : side;
+      ctx.imageSmoothingEnabled = !it.pixel;
+      if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+      return;
+    }
+    var def = findSticker(it.ref);
+    if (!def) return;
+    ctx.imageSmoothingEnabled = true;
+    ctx.shadowColor = def.col;
+    ctx.shadowBlur = 24 * sc * unit;   // 阴影不受 CTM 影响，按画布比例手动缩放
+    var p = makePen(ctx);
+    p.set(def.col);
+    p.px = function (x, y, w, h) { ctx.fillStyle = def.col; ctx.fillRect(x, y, w || 1, h || 1); };
+    def.draw(p, def.u * sc * unit);
+    ctx.shadowBlur = 0;
+  }
+
+  function drawStickerItem(ctx, it, s) {
+    ctx.save();
+    ctx.translate(it.x / 100 * s, it.y / 100 * s);
+    if (it.rot) ctx.rotate(it.rot * Math.PI / 180);
+    drawStickerCore(ctx, it, s / BASE);
+    ctx.restore();
+  }
+
+  // 缩略图：把实例按比例塞进 box 方框
+  function drawStickerThumbOf(ctx, it, box) {
+    ctx.save();
+    ctx.translate(box / 2, box / 2);
+    drawStickerCore(ctx, it, (box * .46) / Math.max(1, stickerRadiusUnit(it)));
+    ctx.restore();
+  }
+
+  // 半宽 / 半高（1024 基准单位）：内建贴纸为正方形，图片贴纸保留原图长宽比
+  function stickerBoxUnit(it) {
+    var r = stickerRadiusUnit(it);
+    if (it.t === 'img' && it.img) {
+      var w = it.img.naturalWidth || it.img.width, h = it.img.naturalHeight || it.img.height;
+      if (!w || !h) return [r, r];
+      return w >= h ? [r, r * h / w] : [r * w / h, r];
+    }
+    return [r, r];
+  }
+
+  function drawStickerSelection(ctx, it, s) {
     var k = s / BASE;
-    ctx.save(); ctx.scale(k, k);
-    var placed = {
-      sweat: [830, 210], anger: [820, 190], zzz: [830, 170], sparkle: [180, 200],
-      hearts: [190, 210], notes: [830, 200], bulb: [830, 190], qmark: [840, 200]
-    };
-    STICKERS.forEach(function (st) {
-      if (!S.stickers[st.id]) return;
-      var col = { sweat: C.blue, anger: C.red, zzz: C.cyan, sparkle: C.gold, hearts: C.pink, notes: C.cyan, bulb: C.gold, qmark: C.gold }[st.id];
-      ctx.save();
-      ctx.shadowColor = col; ctx.shadowBlur = 24 * k;
-      var p = makePen(ctx);
-      p.px = function (x, y, w, h) { ctx.fillStyle = col; ctx.fillRect(x, y, w || 1, h || 1); };
-      var cx = placed[st.id][0], cy = placed[st.id][1], sc = 1;
-      if (st.id === 'sweat') p.drop(cx, cy, 4 * sc);
-      else if (st.id === 'anger') p.anger(cx, cy, 4 * sc);
-      else if (st.id === 'zzz') p.zzz(cx, cy, 4 * sc);
-      else if (st.id === 'qmark') p.qmark(cx, cy, 4 * sc);
-      else if (st.id === 'hearts') { p.heart(cx - 60, cy + 40, 3 * sc); p.heart(cx + 40, cy - 20, 2.2 * sc); p.heart(cx + 90, cy + 60, 1.8 * sc); }
-      else if (st.id === 'sparkle') {
-        [[0, 0, 5], [90, -60, 3.4], [-70, -90, 2.8]].forEach(function (q) {
-          var x = cx + q[0], y = cy + q[1], r = q[2] * sc * 3;
-          ctx.fillStyle = col;
-          ctx.fillRect(x - r, y - r * .18, r * 2, r * .36);
-          ctx.fillRect(x - r * .18, y - r, r * .36, r * 2);
-        });
-      } else if (st.id === 'notes') {
-        drawPat(p, ['####..#', '####..#', '####..#', '...#..#', '.###.##'], cx, cy, 3 * sc);
-      } else if (st.id === 'bulb') {
-        drawPat(p, ['.###.', '#...#', '#...#', '.###.', '..#..', '.###.'], cx, cy, 3.4 * sc);
-      }
-      ctx.restore();
+    var box = stickerBoxUnit(it);
+    var hw = box[0] * k * 1.04, hh = box[1] * k * 1.04;
+    ctx.save();
+    ctx.translate(it.x / 100 * s, it.y / 100 * s);
+    if (it.rot) ctx.rotate(it.rot * Math.PI / 180);
+    ctx.strokeStyle = 'rgba(87,230,196,.95)';
+    ctx.lineWidth = Math.max(1.5, 2.5 * k);
+    ctx.setLineDash([7 * k, 5 * k]);
+    ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(87,230,196,.95)';
+    var hs = Math.max(2, 4 * k);
+    [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(function (p) {
+      ctx.fillRect(p[0] - hs, p[1] - hs, hs * 2, hs * 2);
     });
     ctx.restore();
+  }
+
+  function renderStickers(ctx, s, ui) {
+    S.stickerItems.forEach(function (it) { drawStickerItem(ctx, it, s); });
+    if (!ui) return;                                   // 导出不画选中框
+    var sel = selStickerItem();
+    if (sel) drawStickerSelection(ctx, sel, s);
   }
 
   /* ---------------- 文字 ---------------- */
@@ -1001,12 +1277,13 @@
   }
 
   /* ---------------- 总渲染 ---------------- */
-  function render(ctx, s) {
+  // ui = true 时额外绘制「贴纸选中框」（仅预览用，导出传 false）
+  function render(ctx, s, ui) {
     ctx.clearRect(0, 0, s, s);
     renderBg(ctx, S.bg, s);
     // 全部姿势均走手绘 3D 管线，官方 PNG 仅作底部参考，不进入生成
     if (PROC_POSES[S.pose]) renderProcedural(ctx, s);
-    renderStickers(ctx, s);
+    renderStickers(ctx, s, ui);
     renderText(ctx, s);
   }
 
@@ -1014,7 +1291,7 @@
   var stageCtx = stage.getContext('2d');
   function repaint() {
     document.getElementById('bgChecker').classList.toggle('show', S.bg === 'none');
-    render(stageCtx, BASE);
+    render(stageCtx, BASE, true);
   }
 
   /* ---------------- 缩略图 ---------------- */
@@ -1052,20 +1329,18 @@
   }
   function buildStickerThumb(def) {
     var cv = thumbCanvas(120), c = cv.getContext('2d');
-    var col = { sweat: C.blue, anger: C.red, zzz: C.cyan, sparkle: C.gold, hearts: C.pink, notes: C.cyan, bulb: C.gold, qmark: C.gold }[def.id];
-    c.save(); c.shadowColor = col; c.shadowBlur = 12;
-    var p = makePen(c);
-    p.px = function (x, y, w, h) { c.fillStyle = col; c.fillRect(x, y, w || 1, h || 1); };
-    if (def.id === 'sweat') p.drop(60, 60, 7);
-    else if (def.id === 'anger') p.anger(60, 60, 7);
-    else if (def.id === 'zzz') p.zzz(60, 60, 7);
-    else if (def.id === 'qmark') p.qmark(60, 60, 7);
-    else if (def.id === 'hearts') p.heart(60, 60, 5);
-    else if (def.id === 'sparkle') {
-      c.fillStyle = col;
-      c.fillRect(30, 55, 60, 12); c.fillRect(54, 31, 12, 60);
-    } else if (def.id === 'notes') drawPat(p, ['####..#', '####..#', '####..#', '...#..#', '.###.##'], 60, 60, 5);
-    else if (def.id === 'bulb') drawPat(p, ['.###.', '#...#', '#...#', '.###.', '..#..', '.###.'], 60, 60, 6);
+    c.save();
+    c.translate(60, 60);
+    drawStickerCore(c, { t: 'b', ref: def.id, scale: 1, rot: 0 }, 46 / (def.r * def.u));
+    c.restore();
+    return cv;
+  }
+  function buildPlusThumb() {
+    var cv = thumbCanvas(120), c = cv.getContext('2d');
+    c.save();
+    c.strokeStyle = C.cyan; c.lineWidth = 6; c.lineCap = 'round';
+    c.shadowColor = C.cyan; c.shadowBlur = 10;
+    c.beginPath(); c.moveTo(60, 38); c.lineTo(60, 82); c.moveTo(38, 60); c.lineTo(82, 60); c.stroke();
     c.restore();
     return cv;
   }
@@ -1102,18 +1377,39 @@
       b.onclick = function () { setBg(def.id); };
       bg.appendChild(b);
     });
-    // 贴纸
+    // 自定义背景入口（上传本地图片；未选图时点它即打开文件选择）
+    bgCustomTile = optTile(buildCustomBgThumb(), '自定义图', S.bg === 'custom');
+    bgCustomTile.dataset.v = 'custom';
+    bgCustomTile.classList.add('opt-custom');
+    var bgPen = document.createElement('span');
+    bgPen.className = 'opt-edit';
+    bgPen.textContent = '✎';
+    bgPen.title = '更换背景图片';
+    bgPen.onclick = function (e) { e.stopPropagation(); openBgPicker(); };
+    bgCustomTile.appendChild(bgPen);
+    bgCustomTile.onclick = function () {
+      if (!bgImg) { openBgPicker(); return; }
+      setBg('custom');
+    };
+    bg.appendChild(bgCustomTile);
+    // 贴纸：点选即往画布添加一个实例（可重复添加）
     var sg = document.getElementById('stickerGrid');
     STICKERS.forEach(function (def) {
       var b = optTile(buildStickerThumb(def), def.label, false);
       b.dataset.v = def.id;
-      b.onclick = function () {
-        S.stickers[def.id] = !S.stickers[def.id];
-        b.classList.toggle('active', S.stickers[def.id]);
-        repaint();
-      };
+      b.onclick = function () { addBuiltinSticker(def.id); };
       sg.appendChild(b);
     });
+    var upTile = optTile(buildPlusThumb(), '上传图片', false);
+    upTile.classList.add('opt-add');
+    upTile.title = '上传本地图片作为贴纸';
+    upTile.onclick = openStickerPicker;
+    sg.appendChild(upTile);
+    var drawTile = optTile(buildPlusThumb(), '自己画', false);
+    drawTile.classList.add('opt-add');
+    drawTile.title = '打开 32×32 像素画板，自己画一张贴纸';
+    drawTile.onclick = openStickerEditor;
+    sg.appendChild(drawTile);
     // 文案预设
     var tp = document.getElementById('textPresets');
     TEXT_PRESETS.forEach(function (t) {
@@ -1190,16 +1486,92 @@
     return cv;
   }
 
+  /* ---------------- 像素网格工具（表情画板 / 贴纸画板共用） ---------------- */
+  var GRID_UNDO_MAX = 40;
+
+  function gridBlank(w, h) {
+    var a = new Array(w * h);
+    for (var i = 0; i < a.length; i++) a[i] = '';
+    return a;
+  }
+  function gridStamp(E, x, y) {
+    var col = E.tool === 'eraser' ? '' : E.color;
+    var n = E.size, off = Math.floor((n - 1) / 2);
+    for (var dy = 0; dy < n; dy++) for (var dx = 0; dx < n; dx++) {
+      var px = x - off + dx, py = y - off + dy;
+      if (px < 0 || px >= E.W || py < 0 || py >= E.H) continue;
+      E.cells[py * E.W + px] = col;
+      if (E.mirror) E.cells[py * E.W + (E.W - 1 - px)] = col;
+    }
+  }
+  function gridLine(E, x0, y0, x1, y1) {
+    var dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+    var sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy;
+    for (;;) {
+      gridStamp(E, x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      var e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; x0 += sx; }
+      if (e2 < dx) { err += dx; y0 += sy; }
+    }
+  }
+  function gridFlood(E, x, y, col) {
+    var target = E.cells[y * E.W + x];
+    if (target === col) return;
+    var stack = [[x, y]];
+    while (stack.length) {
+      var p = stack.pop(), cx = p[0], cy = p[1];
+      if (cx < 0 || cx >= E.W || cy < 0 || cy >= E.H) continue;
+      if (E.cells[cy * E.W + cx] !== target) continue;
+      E.cells[cy * E.W + cx] = col;
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+  }
+  function gridPushUndo(E) {
+    E.undo.push(E.cells.slice());
+    if (E.undo.length > GRID_UNDO_MAX) E.undo.shift();
+  }
+  function gridCellAt(cv, e, w, h) {
+    var r = cv.getBoundingClientRect();
+    var x = Math.floor((e.clientX - r.left) / r.width * w);
+    var y = Math.floor((e.clientY - r.top) / r.height * h);
+    if (x < 0 || x >= w || y < 0 || y >= h) return null;
+    return [x, y];
+  }
+  function gridRender(E, cv, cell, centerLine) {
+    var c = cv.getContext('2d');
+    c.clearRect(0, 0, cv.width, cv.height);
+    c.fillStyle = '#0a1114'; c.fillRect(0, 0, cv.width, cv.height);
+    for (var y = 0; y < E.H; y++) for (var x = 0; x < E.W; x++) {
+      var col = E.cells[y * E.W + x];
+      if (!col) continue;
+      c.fillStyle = col;
+      c.fillRect(x * cell, y * cell, cell, cell);
+    }
+    c.lineWidth = 1;
+    c.strokeStyle = 'rgba(87,230,196,.10)';
+    for (var i = 0; i <= E.W; i++) {
+      c.beginPath(); c.moveTo(i * cell + .5, 0); c.lineTo(i * cell + .5, E.H * cell); c.stroke();
+    }
+    for (var j = 0; j <= E.H; j++) {
+      c.beginPath(); c.moveTo(0, j * cell + .5); c.lineTo(E.W * cell, j * cell + .5); c.stroke();
+    }
+    if (centerLine) {
+      c.strokeStyle = 'rgba(87,230,196,.22)';
+      c.beginPath(); c.moveTo(E.W * cell / 2 + .5, 0); c.lineTo(E.W * cell / 2 + .5, E.H * cell); c.stroke();
+    }
+  }
+
   /* ---------------- 像素表情画板 ---------------- */
   var FE_COLORS = [
     ['#9ff7e4', '青'], ['#f2ffff', '白'], ['#ff5a4e', '红'], ['#ff9bd3', '粉'],
     ['#ffd75e', '黄'], ['#6fcbff', '蓝'], ['#8ef58e', '绿'], ['#ffa14a', '橙']
   ];
-  var FE_CELL = 14, FE_UNDO_MAX = 40;
-  var FE = { cells: [], color: FE_COLORS[0][0], tool: 'pen', size: 1, mirror: false, undo: [], editing: null, drawing: false, last: null };
+  var FE_CELL = 14;
+  var FE = { W: FW, H: FH, cells: [], color: FE_COLORS[0][0], tool: 'pen', size: 1, mirror: false, undo: [], editing: null, drawing: false, last: null };
   var feEl = {};
 
-  function feBlank() { var a = new Array(FW * FH); for (var i = 0; i < a.length; i++) a[i] = ''; return a; }
+  function feBlank() { return gridBlank(FW, FH); }
 
   function feBind() {
     feEl.modal = document.getElementById('faceEditor');
@@ -1330,50 +1702,11 @@
     FE.drawing = false; FE.last = null;
   }
 
-  function feCellAt(e) {
-    var r = feEl.canvas.getBoundingClientRect();
-    var x = Math.floor((e.clientX - r.left) / r.width * FW);
-    var y = Math.floor((e.clientY - r.top) / r.height * FH);
-    if (x < 0 || x >= FW || y < 0 || y >= FH) return null;
-    return [x, y];
-  }
-  function feStamp(x, y) {
-    var col = FE.tool === 'eraser' ? '' : FE.color;
-    var n = FE.size, off = Math.floor((n - 1) / 2);
-    for (var dy = 0; dy < n; dy++) for (var dx = 0; dx < n; dx++) {
-      var px = x - off + dx, py = y - off + dy;
-      if (px < 0 || px >= FW || py < 0 || py >= FH) continue;
-      FE.cells[py * FW + px] = col;
-      if (FE.mirror) FE.cells[py * FW + (FW - 1 - px)] = col;
-    }
-  }
-  function feLine(x0, y0, x1, y1) {
-    var dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
-    var sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy;
-    for (;;) {
-      feStamp(x0, y0);
-      if (x0 === x1 && y0 === y1) break;
-      var e2 = 2 * err;
-      if (e2 > -dy) { err -= dy; x0 += sx; }
-      if (e2 < dx) { err += dx; y0 += sy; }
-    }
-  }
-  function feFlood(x, y, col) {
-    var target = FE.cells[y * FW + x];
-    if (target === col) return;
-    var stack = [[x, y]];
-    while (stack.length) {
-      var p = stack.pop(), cx = p[0], cy = p[1];
-      if (cx < 0 || cx >= FW || cy < 0 || cy >= FH) continue;
-      if (FE.cells[cy * FW + cx] !== target) continue;
-      FE.cells[cy * FW + cx] = col;
-      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
-    }
-  }
-  function fePushUndo() {
-    FE.undo.push(FE.cells.slice());
-    if (FE.undo.length > FE_UNDO_MAX) FE.undo.shift();
-  }
+  function feCellAt(e) { return gridCellAt(feEl.canvas, e, FW, FH); }
+  function feStamp(x, y) { gridStamp(FE, x, y); }
+  function feLine(x0, y0, x1, y1) { gridLine(FE, x0, y0, x1, y1); }
+  function feFlood(x, y, col) { gridFlood(FE, x, y, col); }
+  function fePushUndo() { gridPushUndo(FE); }
   function feLoadTemplate(id) {
     var src = getFaceCanvas(id).cv;
     var tmp = document.createElement('canvas');
@@ -1396,27 +1729,7 @@
     feRenderGrid();
     fePreview();
   }
-  function feRenderGrid() {
-    var cv = feEl.canvas, c = cv.getContext('2d'), S = FE_CELL;
-    c.clearRect(0, 0, cv.width, cv.height);
-    c.fillStyle = '#0a1114'; c.fillRect(0, 0, cv.width, cv.height);
-    for (var y = 0; y < FH; y++) for (var x = 0; x < FW; x++) {
-      var col = FE.cells[y * FW + x];
-      if (!col) continue;
-      c.fillStyle = col;
-      c.fillRect(x * S, y * S, S, S);
-    }
-    c.lineWidth = 1;
-    c.strokeStyle = 'rgba(87,230,196,.10)';
-    for (var i = 0; i <= FW; i++) {
-      c.beginPath(); c.moveTo(i * S + .5, 0); c.lineTo(i * S + .5, FH * S); c.stroke();
-    }
-    for (var j = 0; j <= FH; j++) {
-      c.beginPath(); c.moveTo(0, j * S + .5); c.lineTo(FW * S, j * S + .5); c.stroke();
-    }
-    c.strokeStyle = 'rgba(87,230,196,.22)';
-    c.beginPath(); c.moveTo(FW * S / 2 + .5, 0); c.lineTo(FW * S / 2 + .5, FH * S); c.stroke();
-  }
+  function feRenderGrid() { gridRender(FE, feEl.canvas, FE_CELL, true); }
   function fePreview() {
     var cv = feEl.preview, c = cv.getContext('2d');
     var w = cv.width, h = cv.height;
@@ -1481,6 +1794,441 @@
     toast('已删除「' + rec.label + '」');
   }
 
+  /* ---------------- 贴纸：实例、持久化与交互 ---------------- */
+  var stEl = {};
+  var stSeq = 0;
+  var stSaveWarned = false;
+
+  function uid() { stSeq++; return 'sk' + Date.now().toString(36) + stSeq; }
+  function clampPct(v) { v = +v || 0; return Math.max(0, Math.min(100, Math.round(v * 10) / 10)); }
+  function clampScale(v) { v = +v || 1; return Math.max(.25, Math.min(3, Math.round(v * 20) / 20)); }
+  function clampRot(v) { v = +v || 0; return Math.max(-180, Math.min(180, Math.round(v))); }
+
+  function selStickerItem() {
+    if (!S.selSticker) return null;
+    return S.stickerItems.find(function (it) { return it.uid === S.selSticker; }) || null;
+  }
+
+  function makeBuiltinStickerItem(id) {
+    var def = findSticker(id);
+    var home = STICKER_HOME[id] || [BASE / 2, BASE / 2];
+    return {
+      uid: uid(), t: 'b', ref: id, name: def ? def.label : id,
+      x: home[0] / BASE * 100, y: home[1] / BASE * 100, scale: 1, rot: 0
+    };
+  }
+
+  // 一键套系仍是旧版布尔表，这里转成实例（沿用旧版落点，画面效果保持一致）
+  function presetStickerItems(map) {
+    var out = [];
+    Object.keys(map || {}).forEach(function (id) {
+      if (map[id] && findSticker(id)) out.push(makeBuiltinStickerItem(id));
+    });
+    return out;
+  }
+
+  function addBuiltinSticker(id) {
+    if (S.stickerItems.length >= ST_MAX) { toast('画布贴纸最多 ' + ST_MAX + ' 个，先删掉一些'); return; }
+    var it = makeBuiltinStickerItem(id);
+    var n = S.stickerItems.length;
+    if (n) {   // 连续添加时轻微错位，避免完全重叠（第一张保持默认落点）
+      it.x = clampPct(it.x + ((n % 3) - 1) * 4);
+      it.y = clampPct(it.y + ((n % 2) - .5) * 5);
+    }
+    S.stickerItems.push(it);
+    S.selSticker = it.uid;
+    stickerChanged();
+  }
+
+  function selectSticker(uidVal) {
+    S.selSticker = uidVal || null;
+    rebuildStickerList();
+    syncStickerCtl();
+    repaint();
+  }
+
+  function stickerChanged() {
+    rebuildStickerList();
+    syncStickerCtl();
+    repaint();
+    saveStickersSoon();
+  }
+
+  function layerSticker(cmd) {
+    var it = selStickerItem();
+    if (!it) return;
+    var i = S.stickerItems.indexOf(it);
+    var j = cmd === 'up' ? i + 1 : cmd === 'down' ? i - 1 : cmd === 'top' ? S.stickerItems.length - 1 : 0;
+    if (j === i || j < 0 || j >= S.stickerItems.length) return;
+    S.stickerItems.splice(i, 1);
+    S.stickerItems.splice(j, 0, it);
+    stickerChanged();
+  }
+
+  function deleteSelectedSticker() {
+    var it = selStickerItem();
+    if (!it) return;
+    S.stickerItems = S.stickerItems.filter(function (x) { return x !== it; });
+    S.selSticker = null;
+    stickerChanged();
+  }
+
+  function clearStickers() {
+    if (!S.stickerItems.length) return;
+    if (!window.confirm('清空画布上的全部贴纸（共 ' + S.stickerItems.length + ' 张）？此操作不可恢复。')) return;
+    S.stickerItems = [];
+    S.selSticker = null;
+    stickerChanged();
+  }
+
+  /* ---------------- 贴纸：持久化 ---------------- */
+  function serializableStickers() {
+    return S.stickerItems.map(function (it) {
+      return {
+        uid: it.uid, t: it.t, ref: it.ref || null, src: it.src || null, pixel: !!it.pixel,
+        name: it.name || '', x: it.x, y: it.y, scale: it.scale || 1, rot: it.rot || 0
+      };
+    });
+  }
+
+  function hydrateStickerItems(list) {
+    S.selSticker = null;
+    S.stickerItems = (Array.isArray(list) ? list : []).filter(function (raw) {
+      if (!raw || (raw.t === 'img' ? typeof raw.src !== 'string' || !raw.src : !findSticker(raw.ref))) return false;
+      return true;
+    }).slice(0, ST_MAX).map(function (raw) {
+      var it = {
+        uid: raw.uid || uid(),
+        t: raw.t === 'img' ? 'img' : 'b',
+        ref: raw.ref || null, src: raw.src || null, pixel: !!raw.pixel,
+        name: String(raw.name || '').slice(0, 8),
+        x: clampPct(raw.x), y: clampPct(raw.y), scale: clampScale(raw.scale), rot: clampRot(raw.rot)
+      };
+      if (it.t === 'img') {
+        var img = new Image();
+        img.onload = function () { repaint(); rebuildStickerList(); };
+        img.src = it.src;
+        it.img = img;
+      } else {
+        var def = findSticker(it.ref);
+        it.name = it.name || (def ? def.label : '贴纸');
+      }
+      return it;
+    });
+  }
+
+  function loadStickers() {
+    var rec = null;
+    try { rec = JSON.parse(localStorage.getItem(ST_KEY) || 'null'); } catch (e) { rec = null; }
+    if (!rec) return;
+    hydrateStickerItems(rec.items || rec);
+  }
+
+  function saveStickers() {
+    try {
+      localStorage.setItem(ST_KEY, JSON.stringify({ v: 1, items: serializableStickers() }));
+      return true;
+    } catch (e) {
+      if (!stSaveWarned) {
+        stSaveWarned = true;
+        toast('本机存储空间不足，贴纸刷新后可能丢失');
+      }
+      return false;
+    }
+  }
+  function saveStickersSoon() {
+    clearTimeout(saveStickersSoon._t);
+    saveStickersSoon._t = setTimeout(saveStickers, 260);
+  }
+
+  /* ---------------- 贴纸：上传图片 ---------------- */
+  function openStickerPicker() {
+    if (!stEl.file) return;
+    stEl.file.value = '';   // 允许重复选同一张图
+    stEl.file.click();
+  }
+
+  function applyStickerFile(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { toast('请选择图片文件（JPG / PNG / WebP）'); return; }
+    if (S.stickerItems.length >= ST_MAX) { toast('画布贴纸最多 ' + ST_MAX + ' 个，先删掉一些'); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var raw = new Image();
+      raw.onload = function () {
+        var sc = Math.min(1, ST_IMG_MAX / Math.max(raw.naturalWidth, raw.naturalHeight));
+        var cw = Math.max(1, Math.round(raw.naturalWidth * sc));
+        var ch = Math.max(1, Math.round(raw.naturalHeight * sc));
+        var cv = document.createElement('canvas');
+        cv.width = cw; cv.height = ch;
+        var c = cv.getContext('2d');
+        c.drawImage(raw, 0, 0, cw, ch);
+        var data = null;
+        try {
+          // 带透明像素存 PNG，普通照片存 JPEG（体积小，避免撑爆 localStorage）
+          data = cv.toDataURL(hasAlphaPixels(c, cw, ch) ? 'image/png' : 'image/jpeg', .9);
+        } catch (e) { data = null; }
+        var name = file.name.replace(/\.\w+$/, '').slice(0, 8) || '图片';
+        var it = { uid: uid(), t: 'img', src: data, pixel: false, name: name, x: 50, y: 50, scale: 1, rot: 0, img: cv };
+        S.stickerItems.push(it);
+        S.selSticker = it.uid;
+        stickerChanged();
+        toast(data ? '已添加贴纸「' + name + '」' : '已添加贴纸（本机存储不可用，刷新会丢失）');
+      };
+      raw.onerror = function () { toast('这张图片打不开，换一张试试'); };
+      raw.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  /* ---------------- 贴纸：列表与控制面板 ---------------- */
+  function rebuildStickerList() {
+    if (!stEl.list) return;
+    stEl.list.innerHTML = '';
+    if (!S.stickerItems.length) {
+      var p = document.createElement('p');
+      p.className = 'st-empty';
+      p.textContent = '画布上还没有贴纸：点上方任意一款添加。';
+      stEl.list.appendChild(p);
+      return;
+    }
+    S.stickerItems.forEach(function (it, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'st-chip' + (it.uid === S.selSticker ? ' active' : '');
+      b.title = (it.name || '贴纸') + ' · 第 ' + (i + 1) + ' 层（由底到顶）';
+      var cv = thumbCanvas(44);
+      drawStickerThumbOf(cv.getContext('2d'), it, 44);
+      b.appendChild(cv);
+      var lab = document.createElement('span');
+      lab.textContent = it.name || '贴纸';
+      b.appendChild(lab);
+      b.onclick = function () { selectSticker(it.uid); };
+      stEl.list.appendChild(b);
+    });
+  }
+
+  function syncStickerCtl() {
+    if (!stEl.ctl) return;
+    var it = selStickerItem();
+    stEl.ctl.classList.toggle('hidden', !it);
+    if (!it) return;
+    stEl.name.textContent = it.name || '贴纸';
+    stEl.x.value = Math.round(it.x);
+    stEl.y.value = Math.round(it.y);
+    stEl.scale.value = it.scale || 1;
+    stEl.rot.value = Math.round(it.rot || 0);
+    stEl.xVal.textContent = Math.round(it.x) + '%';
+    stEl.yVal.textContent = Math.round(it.y) + '%';
+    stEl.scaleVal.textContent = (it.scale || 1).toFixed(2) + '×';
+    stEl.rotVal.textContent = Math.round(it.rot || 0) + '°';
+  }
+
+  function stBind() {
+    stEl.file = document.getElementById('stickerFile');
+    stEl.list = document.getElementById('stickerList');
+    stEl.ctl = document.getElementById('stickerCtl');
+    stEl.name = document.getElementById('stickerSelName');
+    stEl.x = document.getElementById('stX'); stEl.xVal = document.getElementById('stXVal');
+    stEl.y = document.getElementById('stY'); stEl.yVal = document.getElementById('stYVal');
+    stEl.scale = document.getElementById('stScale'); stEl.scaleVal = document.getElementById('stScaleVal');
+    stEl.rot = document.getElementById('stRot'); stEl.rotVal = document.getElementById('stRotVal');
+
+    stEl.file.onchange = function () {
+      var f = stEl.file.files && stEl.file.files[0];
+      if (f) applyStickerFile(f);
+      stEl.file.value = '';
+    };
+    [['x', 'x'], ['y', 'y'], ['scale', 'scale'], ['rot', 'rot']].forEach(function (pair) {
+      var input = stEl[pair[0]];
+      input.addEventListener('input', function () {
+        var it = selStickerItem();
+        if (!it) return;
+        if (pair[1] === 'x') it.x = clampPct(input.value);
+        else if (pair[1] === 'y') it.y = clampPct(input.value);
+        else if (pair[1] === 'scale') it.scale = clampScale(input.value);
+        else it.rot = clampRot(input.value);
+        syncStickerCtl();
+        repaint();
+      });
+      input.addEventListener('change', function () { saveStickersSoon(); });
+    });
+    document.getElementById('stickerDeselect').onclick = function () { selectSticker(null); };
+    document.getElementById('stickerDelete').onclick = deleteSelectedSticker;
+    document.getElementById('stickerClear').onclick = clearStickers;
+    [].forEach.call(document.querySelectorAll('#stickerCtl .sticker-layer button'), function (b) {
+      b.onclick = function () { layerSticker(b.dataset.v); };
+    });
+  }
+
+  /* ---------------- 贴纸画板（32 × 32） ---------------- */
+  var SE_COLORS = [
+    ['#9ff7e4', '青'], ['#f2ffff', '白'], ['#ff5a4e', '红'], ['#ff9bd3', '粉'], ['#ffd75e', '黄'],
+    ['#6fcbff', '蓝'], ['#8ef58e', '绿'], ['#ffa14a', '橙'], ['#c9a2ff', '紫'], ['#1a1d20', '黑']
+  ];
+  var SE_W = 32, SE_H = 32, SE_CELL = 15;
+  var SE = { W: SE_W, H: SE_H, cells: [], color: SE_COLORS[0][0], tool: 'pen', size: 1, mirror: false, undo: [], drawing: false, last: null };
+  var seEl = {};
+
+  function seBind() {
+    seEl.modal = document.getElementById('stickerEditor');
+    seEl.canvas = document.getElementById('seCanvas');
+    seEl.preview = document.getElementById('sePreview');
+    seEl.name = document.getElementById('seName');
+    seEl.tools = document.getElementById('seTools');
+    seEl.sizeWrap = document.getElementById('seSize');
+    seEl.palette = document.getElementById('seColors');
+    seEl.mirror = document.getElementById('seMirror');
+
+    SE_COLORS.forEach(function (pair) {
+      var sw = document.createElement('button');
+      sw.type = 'button'; sw.className = 'fe-sw'; sw.dataset.c = pair[0];
+      sw.style.setProperty('--c', pair[0]); sw.title = pair[1];
+      sw.onclick = function () {
+        SE.color = pair[0];
+        if (SE.tool === 'eraser') SE.tool = 'pen';
+        seSyncTools();
+      };
+      seEl.palette.appendChild(sw);
+    });
+    [].forEach.call(seEl.tools.querySelectorAll('.fe-tool'), function (b) {
+      b.onclick = function () { SE.tool = b.dataset.tool; seSyncTools(); };
+    });
+    [].forEach.call(seEl.sizeWrap.querySelectorAll('.fe-size'), function (b) {
+      b.onclick = function () { SE.size = +b.dataset.s; seSyncTools(); };
+    });
+    seEl.mirror.onchange = function () { SE.mirror = seEl.mirror.checked; };
+
+    seEl.canvas.addEventListener('pointerdown', function (e) {
+      var p = gridCellAt(seEl.canvas, e, SE_W, SE_H);
+      if (!p) return;
+      e.preventDefault();
+      seEl.canvas.setPointerCapture(e.pointerId);
+      gridPushUndo(SE);
+      if (SE.tool === 'fill') {
+        gridFlood(SE, p[0], p[1], SE.color);
+      } else {
+        SE.drawing = true; SE.last = p;
+        gridStamp(SE, p[0], p[1]);
+      }
+      sePaintUpdate();
+    });
+    seEl.canvas.addEventListener('pointermove', function (e) {
+      if (!SE.drawing) return;
+      var p = gridCellAt(seEl.canvas, e, SE_W, SE_H);
+      if (!p) return;
+      if (SE.last) gridLine(SE, SE.last[0], SE.last[1], p[0], p[1]);
+      SE.last = p;
+      sePaintUpdate();
+    });
+    ['pointerup', 'pointercancel'].forEach(function (t) {
+      seEl.canvas.addEventListener(t, function () { SE.drawing = false; SE.last = null; });
+    });
+
+    document.getElementById('seClose').onclick = closeStickerEditor;
+    document.getElementById('seUndo').onclick = function () {
+      if (!SE.undo.length) return;
+      SE.cells = SE.undo.pop();
+      sePaintUpdate();
+    };
+    document.getElementById('seClear').onclick = function () {
+      gridPushUndo(SE);
+      SE.cells = gridBlank(SE_W, SE_H);
+      sePaintUpdate();
+    };
+    document.getElementById('seSave').onclick = seSave;
+    seEl.modal.addEventListener('click', function (e) { if (e.target === seEl.modal) closeStickerEditor(); });
+    document.addEventListener('keydown', function (e) {
+      if (seEl.modal.classList.contains('hidden')) return;
+      if (e.key === 'Escape') closeStickerEditor();
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (SE.undo.length) { SE.cells = SE.undo.pop(); sePaintUpdate(); }
+      }
+    });
+  }
+
+  function seSyncTools() {
+    [].forEach.call(seEl.tools.querySelectorAll('.fe-tool'), function (b) {
+      b.classList.toggle('active', b.dataset.tool === SE.tool);
+    });
+    [].forEach.call(seEl.sizeWrap.querySelectorAll('.fe-size'), function (b) {
+      b.classList.toggle('active', +b.dataset.s === SE.size);
+    });
+    [].forEach.call(seEl.palette.children, function (b) {
+      b.classList.toggle('active', b.dataset.c === SE.color);
+    });
+  }
+
+  function openStickerEditor() {
+    SE.cells = gridBlank(SE_W, SE_H);
+    SE.undo = [];
+    SE.tool = 'pen'; SE.size = 1; SE.mirror = false;
+    SE.color = SE_COLORS[0][0];
+    SE.drawing = false; SE.last = null;
+    if (!seEl.modal) seBind();
+    seEl.name.value = '';
+    seEl.mirror.checked = false;
+    seEl.modal.classList.remove('hidden');
+    seSyncTools();
+    sePaintUpdate();
+    setTimeout(function () { seEl.name.focus(); }, 30);
+  }
+
+  function closeStickerEditor() {
+    if (!seEl.modal) return;
+    seEl.modal.classList.add('hidden');
+    SE.drawing = false; SE.last = null;
+  }
+
+  function sePaintUpdate() {
+    gridRender(SE, seEl.canvas, SE_CELL, false);
+    sePreview();
+  }
+
+  function sePreview() {
+    var cv = seEl.preview, c = cv.getContext('2d');
+    var w = cv.width, h = cv.height, sq = 12;
+    c.clearRect(0, 0, w, h);
+    for (var y = 0; y < h; y += sq) for (var x = 0; x < w; x += sq) {
+      c.fillStyle = ((x / sq + y / sq) % 2 === 0) ? '#151b1f' : '#0f1417';
+      c.fillRect(x, y, sq, sq);
+    }
+    var tmp = document.createElement('canvas');
+    tmp.width = SE_W; tmp.height = SE_H;
+    var tc = tmp.getContext('2d');
+    for (var yy = 0; yy < SE_H; yy++) for (var xx = 0; xx < SE_W; xx++) {
+      var col = SE.cells[yy * SE_W + xx];
+      if (col) { tc.fillStyle = col; tc.fillRect(xx, yy, 1, 1); }
+    }
+    var box = Math.min(w, h) - 24;
+    c.imageSmoothingEnabled = false;
+    c.drawImage(tmp, (w - box) / 2, (h - box) / 2, box, box);
+  }
+
+  function seSave() {
+    var label = (seEl.name.value || '').trim().slice(0, 8) || '我的贴纸';
+    var ink = false;
+    for (var i = 0; i < SE.cells.length; i++) if (SE.cells[i]) { ink = true; break; }
+    if (!ink) { toast('画板还是空的，先画点东西'); return; }
+    if (S.stickerItems.length >= ST_MAX) { toast('画布贴纸最多 ' + ST_MAX + ' 个，先删掉一些'); return; }
+    var cv = document.createElement('canvas');
+    cv.width = SE_W; cv.height = SE_H;
+    var c = cv.getContext('2d');
+    for (var y = 0; y < SE_H; y++) for (var x = 0; x < SE_W; x++) {
+      var col = SE.cells[y * SE_W + x];
+      if (col) { c.fillStyle = col; c.fillRect(x, y, 1, 1); }
+    }
+    var src = null;
+    try { src = cv.toDataURL('image/png'); } catch (e) { src = null; }
+    var it = { uid: uid(), t: 'img', src: src, pixel: true, name: label, x: 50, y: 50, scale: 1, rot: 0, img: cv };
+    S.stickerItems.push(it);
+    S.selSticker = it.uid;
+    closeStickerEditor();
+    stickerChanged();
+    toast(src ? '已添加贴纸「' + label + '」' : '已添加贴纸（本机存储不可用，刷新会丢失）');
+  }
+
   /* ---------------- 状态切换 ---------------- */
   function setActive(groupEl, v) {
     [].forEach.call(groupEl.children, function (c) {
@@ -1505,18 +2253,17 @@
   function applyPreset(p) {
     S.pose = p.pose; S.face = p.face; S.bg = p.bg;
     S.text = JSON.parse(JSON.stringify(p.text));
-    S.stickers = {};
-    STICKERS.forEach(function (s) { S.stickers[s.id] = false; });
-    Object.keys(p.stickers || {}).forEach(function (k) { S.stickers[k] = true; });
+    S.stickerItems = presetStickerItems(p.stickers);
+    S.selSticker = null;
     document.getElementById('textInput').value = S.text.content;
     document.getElementById('textSize').value = S.text.size;
     setTextPos(S.text.pos); setTextStyle(S.text.style);
     setActive(document.getElementById('textColor'), S.text.color);
     setPose(S.pose); setFace(S.face); setBg(S.bg);
-    [].forEach.call(document.getElementById('stickerGrid').children, function (c) {
-      c.classList.toggle('active', !!S.stickers[c.dataset.v]);
-    });
+    rebuildStickerList();
+    syncStickerCtl();
     repaint();
+    saveStickersSoon();
     toast('已应用套系「' + p.label + '」');
   }
 
@@ -1565,26 +2312,83 @@
       rigInputs[d[0]].val.textContent = Math.round(v) + '°';
     });
   }
-  // 画布拖拽 → 转动身体（仅手绘模型）
+  // 画布交互：优先拖动贴纸；空白处拖动转身（仅手绘模型）
   (function drag() {
-    var dragging = false, lx = 0, ly = 0;
+    var mode = null, lx = 0, ly = 0, offX = 0, offY = 0;
+    function toCanvas(e) {
+      var r = stage.getBoundingClientRect();
+      return [(e.clientX - r.left) / r.width * BASE, (e.clientY - r.top) / r.height * BASE];
+    }
+    function hitSticker(cx, cy) {
+      for (var i = S.stickerItems.length - 1; i >= 0; i--) {   // 顶层优先
+        var it = S.stickerItems[i];
+        var dx = cx - it.x / 100 * BASE, dy = cy - it.y / 100 * BASE;
+        var box = stickerBoxUnit(it);
+        var a = -(it.rot || 0) * Math.PI / 180;
+        var ca = Math.cos(a), sa = Math.sin(a);
+        var lx = dx * ca - dy * sa, ly = dx * sa + dy * ca;   // 反向旋转到贴纸本地坐标
+        if (Math.abs(lx) <= box[0] * 1.08 && Math.abs(ly) <= box[1] * 1.08) return it;
+      }
+      return null;
+    }
     function isProc() { return !!PROC_POSES[S.pose]; }
     stage.addEventListener('pointerdown', function (e) {
-      if (!isProc()) return;
-      dragging = true; lx = e.clientX; ly = e.clientY;
+      var p = toCanvas(e);
+      var hit = hitSticker(p[0], p[1]);
+      if (hit) {
+        e.preventDefault();
+        selectSticker(hit.uid);
+        mode = 'sticker';
+        offX = p[0] - hit.x / 100 * BASE;
+        offY = p[1] - hit.y / 100 * BASE;
+        stage.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (S.selSticker) selectSticker(null);
+      if (!isProc()) { repaint(); return; }
+      mode = 'body'; lx = e.clientX; ly = e.clientY;
       stage.setPointerCapture(e.pointerId);
     });
     stage.addEventListener('pointermove', function (e) {
-      if (!dragging) return;
-      if (!S.rig) S.rig = rigClone(REST_RIG);
-      S.rig.bodyYaw = Math.max(-50, Math.min(50, S.rig.bodyYaw + (e.clientX - lx) * 0.35));
-      S.rig.bodyPitch = Math.max(-25, Math.min(25, S.rig.bodyPitch + (e.clientY - ly) * 0.25));
-      lx = e.clientX; ly = e.clientY;
-      syncRigUI();
-      repaint();
+      if (mode === 'sticker') {
+        var it = selStickerItem();
+        if (!it) return;
+        var p = toCanvas(e);
+        it.x = clampPct((p[0] - offX) / BASE * 100);
+        it.y = clampPct((p[1] - offY) / BASE * 100);
+        syncStickerCtl();
+        repaint();
+        return;
+      }
+      if (mode === 'body') {
+        if (!S.rig) S.rig = rigClone(REST_RIG);
+        S.rig.bodyYaw = Math.max(-50, Math.min(50, S.rig.bodyYaw + (e.clientX - lx) * 0.35));
+        S.rig.bodyPitch = Math.max(-25, Math.min(25, S.rig.bodyPitch + (e.clientY - ly) * 0.25));
+        lx = e.clientX; ly = e.clientY;
+        syncRigUI();
+        repaint();
+        return;
+      }
+      var q = toCanvas(e);
+      stage.style.cursor = hitSticker(q[0], q[1]) ? 'move' : '';   // 悬停提示可拖动
     });
-    stage.addEventListener('pointerup', function () { dragging = false; });
-    stage.addEventListener('pointercancel', function () { dragging = false; });
+    ['pointerup', 'pointercancel'].forEach(function (t) {
+      stage.addEventListener(t, function () {
+        if (mode === 'sticker') saveStickersSoon();
+        mode = null;
+      });
+    });
+    stage.addEventListener('pointerleave', function () { stage.style.cursor = ''; });
+
+    // Delete / Esc：删除或取消选中贴纸（输入框内不拦截；两个画板弹窗打开时不响应）
+    document.addEventListener('keydown', function (e) {
+      if (!S.selSticker) return;
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '')) return;
+      if ((seEl.modal && !seEl.modal.classList.contains('hidden')) ||
+          !document.getElementById('faceEditor').classList.contains('hidden')) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedSticker(); }
+      else if (e.key === 'Escape') selectSticker(null);
+    });
   })();
 
   /* ---------------- 交互绑定 ---------------- */
@@ -1620,14 +2424,14 @@
     S.pose = 'pstand'; S.face = 'normal'; S.bg = 'none';
     S.rig = rigClone(REST_RIG); syncRigUI();
     S.text = { content: '', pos: 'bottom', style: 'meme', color: '#ffffff', size: 1 };
-    STICKERS.forEach(function (s) { S.stickers[s.id] = false; });
+    S.stickerItems = [];
+    S.selSticker = null;
     document.getElementById('textInput').value = '';
     document.getElementById('textSize').value = 1;
     setTextPos('bottom'); setTextStyle('meme');
     setActive(document.getElementById('textColor'), '#ffffff');
     setPose(S.pose); setFace(S.face); setBg(S.bg);
-    [].forEach.call(document.getElementById('stickerGrid').children, function (c) { c.classList.remove('active'); });
-    repaint();
+    stickerChanged();
   };
   document.getElementById('btnRandom').onclick = function () {
     var pick = function (a) { return a[Math.floor(Math.random() * a.length)]; };
@@ -1635,8 +2439,9 @@
     S.pose = pick(poses);
     S.face = pick(FACES).id;
     if (Math.random() < .6) S.bg = pick(BGS).id;
-    S.stickers = {};
-    STICKERS.forEach(function (x) { S.stickers[x.id] = Math.random() < .18; });
+    S.stickerItems = [];
+    STICKERS.forEach(function (x) { if (Math.random() < .18) S.stickerItems.push(makeBuiltinStickerItem(x.id)); });
+    S.selSticker = null;
     if (Math.random() < .75) {
       S.text.content = pick(TEXT_PRESETS);
       document.getElementById('textInput').value = S.text.content;
@@ -1653,10 +2458,7 @@
       rr.bounce = pick([0, 0, -12, -26]);
       syncRigUI();
     }
-    [].forEach.call(document.getElementById('stickerGrid').children, function (c) {
-      c.classList.toggle('active', !!S.stickers[c.dataset.v]);
-    });
-    repaint();
+    stickerChanged();
   };
 
   /* ---------------- 导出 ---------------- */
@@ -1706,7 +2508,12 @@
   };
   document.getElementById('btnBatch').onclick = function () {
     var i = 0;
-    var keep = JSON.stringify(S);
+    // 贴纸实例含 Image 对象，快照前先序列化成可 JSON 的纯数据
+    var keep = JSON.stringify({
+      pose: S.pose, face: S.face, bg: S.bg, rig: S.rig, text: S.text,
+      bgFit: S.bgFit, bgOffX: S.bgOffX, bgOffY: S.bgOffY,
+      stickerItems: serializableStickers()
+    });
     function next() {
       if (i >= PRESETS.length) {
         restoreState(JSON.parse(keep));
@@ -1727,7 +2534,8 @@
   function restoreState(st) {
     S.pose = st.pose; S.face = st.face; S.bg = st.bg;
     S.text = JSON.parse(JSON.stringify(st.text));
-    S.stickers = JSON.parse(JSON.stringify(st.stickers));
+    S.bgFit = st.bgFit || 'cover'; S.bgOffX = st.bgOffX || 0; S.bgOffY = st.bgOffY || 0;
+    hydrateStickerItems(st.stickerItems || []);
     document.getElementById('textInput').value = S.text.content;
     document.getElementById('textSize').value = S.text.size;
     setTextPos(S.text.pos); setTextStyle(S.text.style);
@@ -1735,10 +2543,10 @@
     setPose(S.pose); setFace(S.face); setBg(S.bg);
     S.rig = st.rig ? rigClone(st.rig) : rigClone(REST_RIG); // setPose 会载入预设姿势，这里恢复用户自定义骨骼
     syncRigUI();
-    [].forEach.call(document.getElementById('stickerGrid').children, function (c) {
-      c.classList.toggle('active', !!S.stickers[c.dataset.v]);
-    });
+    rebuildStickerList();
+    syncStickerCtl();
     repaint();
+    saveStickersSoon();
   }
 
   /* ---------------- 头像 logo ---------------- */
@@ -1761,12 +2569,20 @@
 
   /* ---------------- 启动 ---------------- */
   // 调试/高级用法句柄
-  window.__traeEmoji = { S: S, repaint: repaint, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, dbg3d: { buildSkeleton: buildSkeleton, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
+  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, dbg3d: { buildSkeleton: buildSkeleton, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
   function init() {
     feBind();
+    seBind();
     buildRigUI();
     syncRigUI();
     buildOptions();
+    stBind();
+    loadStickers();
+    rebuildStickerList();
+    syncStickerCtl();
+    bindBgUI();
+    syncBgUI();
+    loadCustomBg();
     repaint();
   }
   init();

@@ -76,6 +76,35 @@
     <div class="tab-body hidden" id="tab-bg">
       <h3 class="group-title">背景样式 <small>透明底可直接当表情包</small></h3>
       <div class="option-grid" id="bgGrid"></div>
+
+      <h3 class="group-title">自定义背景 <small>上传本地图片，只在浏览器内处理</small></h3>
+      <div class="bg-custom-panel">
+        <div class="bg-custom-head">
+          <button id="bgPick" class="btn" type="button">🖼 选择图片</button>
+          <button id="bgClear" class="btn ghost hidden" type="button">移除</button>
+          <span id="bgName" class="bg-name">未选择图片</span>
+        </div>
+        <input id="bgFile" type="file" accept="image/*" hidden>
+        <div id="bgAdjust" class="hidden">
+          <h3 class="group-title">显示方式</h3>
+          <div class="segment" id="bgFit">
+            <button data-v="cover" class="active" type="button">填充</button>
+            <button data-v="contain" type="button">适应</button>
+            <button data-v="tile" type="button">平铺</button>
+          </div>
+          <div class="rig-grid bg-offset-grid">
+            <div class="rig-item">
+              <label><span>水平位置</span><b id="bgOffXVal">0%</b></label>
+              <input id="bgOffX" type="range" min="-30" max="30" step="1" value="0">
+            </div>
+            <div class="rig-item">
+              <label><span>垂直位置</span><b id="bgOffYVal">0%</b></label>
+              <input id="bgOffY" type="range" min="-30" max="30" step="1" value="0">
+            </div>
+          </div>
+        </div>
+        <p class="fe-tip">图片仅在浏览器本地读取，不会上传；最长边自动压到 1024，并保存在本机浏览器。平铺模式按原图尺寸重复。</p>
+      </div>
     </div>
 
     <div class="tab-body hidden" id="tab-text">
@@ -109,8 +138,47 @@
     </div>
 
     <div class="tab-body hidden" id="tab-sticker">
-      <h3 class="group-title">氛围贴纸 <small>可与表情自带特效叠加</small></h3>
+      <h3 class="group-title">氛围贴纸 <small>点一次加一张，可重复添加</small></h3>
       <div class="option-grid" id="stickerGrid"></div>
+      <input id="stickerFile" type="file" accept="image/*" hidden>
+
+      <h3 class="group-title">画布贴纸 <small>直接在预览画布拖动即可移动</small></h3>
+      <div class="sticker-list" id="stickerList"></div>
+      <div id="stickerCtl" class="sticker-ctl hidden">
+        <div class="sticker-ctl-head">
+          <span id="stickerSelName">贴纸</span>
+          <button id="stickerDeselect" class="btn ghost sticker-mini" type="button">取消选择</button>
+        </div>
+        <div class="rig-grid">
+          <div class="rig-item">
+            <label><span>水平位置</span><b id="stXVal">50%</b></label>
+            <input id="stX" type="range" min="0" max="100" step="1" value="50">
+          </div>
+          <div class="rig-item">
+            <label><span>垂直位置</span><b id="stYVal">50%</b></label>
+            <input id="stY" type="range" min="0" max="100" step="1" value="50">
+          </div>
+          <div class="rig-item">
+            <label><span>大小</span><b id="stScaleVal">1.00×</b></label>
+            <input id="stScale" type="range" min="0.25" max="3" step="0.05" value="1">
+          </div>
+          <div class="rig-item">
+            <label><span>旋转</span><b id="stRotVal">0°</b></label>
+            <input id="stRot" type="range" min="-180" max="180" step="1" value="0">
+          </div>
+        </div>
+        <div class="sticker-layer">
+          <button data-v="down" class="btn ghost sticker-mini" type="button">⬇ 下移一层</button>
+          <button data-v="up" class="btn ghost sticker-mini" type="button">⬆ 上移一层</button>
+          <button data-v="bottom" class="btn ghost sticker-mini" type="button">置底</button>
+          <button data-v="top" class="btn ghost sticker-mini" type="button">置顶</button>
+        </div>
+        <div class="sticker-ops">
+          <button id="stickerDelete" class="btn ghost sticker-mini" type="button">删除这张</button>
+          <button id="stickerClear" class="btn ghost sticker-mini" type="button">清空全部</button>
+        </div>
+        <p class="fe-tip">图层顺序：列表从左到右 = 由底到顶；导出按同一顺序绘制，选中框不会出现在导出图里。</p>
+      </div>
     </div>
 
     <h3 class="group-title preset-title">一键套系 <small>按官方示例场景配好全套</small></h3>
@@ -169,9 +237,49 @@
   </div>
 </div>
 
+<div id="stickerEditor" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="seTitle">
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="seTitle">画一张贴纸</h2>
+      <button id="seClose" class="btn ghost modal-close" type="button" aria-label="关闭">✕</button>
+    </header>
+    <div class="editor-grid">
+      <div class="editor-main">
+        <canvas id="seCanvas" width="480" height="480" aria-label="32 × 32 贴纸画板"></canvas>
+        <div class="fe-bar" id="seTools">
+          <button type="button" class="fe-tool active" data-tool="pen">✏️ 画笔</button>
+          <button type="button" class="fe-tool" data-tool="eraser">◻ 橡皮</button>
+          <button type="button" class="fe-tool" data-tool="fill">🪣 填充</button>
+          <span class="fe-sizes" id="seSize">
+            <button type="button" class="fe-size active" data-s="1">1px</button>
+            <button type="button" class="fe-size" data-s="2">2px</button>
+            <button type="button" class="fe-size" data-s="3">3px</button>
+          </span>
+          <label class="fe-check"><input type="checkbox" id="seMirror"> 左右对称</label>
+        </div>
+        <div class="fe-bar">
+          <div class="fe-colors" id="seColors"></div>
+        </div>
+        <div class="fe-bar">
+          <button id="seUndo" class="btn ghost" type="button">↶ 撤销</button>
+          <button id="seClear" class="btn ghost" type="button">清空</button>
+        </div>
+      </div>
+      <aside class="editor-side">
+        <canvas id="sePreview" width="240" height="240" aria-label="贴纸实时预览"></canvas>
+        <label class="fe-field">名称
+          <input id="seName" maxlength="8" placeholder="我的贴纸" autocomplete="off">
+        </label>
+        <button id="seSave" class="btn primary" type="button">保存并放到画布</button>
+        <p class="fe-tip">画板 32 × 32，透明底；保存后加入画布，可用拖动 / 滑杆调整位置、大小与旋转。刷新后贴纸仍在。</p>
+      </aside>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" role="status"></div>
 
 <script src="js/assets.js?v=12"></script>
-<script src="js/app.js?v=12"></script>
+<script src="js/app.js?v=14"></script>
 </body>
 </html>
