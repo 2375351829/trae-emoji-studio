@@ -326,6 +326,7 @@
     };
   }
   function mT(v) { return { r: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [v[0], v[1], v[2]] }; }
+  function mS(v) { return { r: [v, 0, 0, 0, v, 0, 0, 0, v], t: [0, 0, 0] }; }
   function mRX(t) { var c = Math.cos(t), s = Math.sin(t); return { r: [1, 0, 0, 0, c, -s, 0, s, c], t: [0, 0, 0] }; }
   function mRY(t) { var c = Math.cos(t), s = Math.sin(t); return { r: [c, 0, s, 0, 1, 0, -s, 0, c], t: [0, 0, 0] }; }
   function mRZ(t) { var c = Math.cos(t), s = Math.sin(t); return { r: [c, -s, 0, s, c, 0, 0, 0, 1], t: [0, 0, 0] }; }
@@ -348,8 +349,15 @@
   // 屏幕占比按官方正视图实测：玻璃高 0.68H、上缘下移 53（下方留 47 的「下巴」）
   // 显示器为凸出式装配件：边框板凸出前脸 12、玻璃再内凹 4，侧/顶视可见台阶（五视图/官方一致）
   // 骨骼按 MC 式简化：头 / 躯干 / 双臂（肩关节）/ 双腿（髋关节）+ 随腿脚掌，
-  // 取消肘、膝关节（肢段一体的刚体旋转，不做弯曲）
-  var GEO3D = {
+  // 原骨骼取消肘、膝关节；v1.7 在前臂节点上附加局部变换，默认仍保持单段外观
+  //
+  // ── 全身塑形引擎（v1.8.0）──────────────────────────────
+  // BODY_BASE：官方标准体型的实测基准尺寸（v1.7.4 定稿，含派生量的官方实测值）。
+  // BODY_REST：十项体型比例，全部 = 1 即官方标准体型（默认档）。
+  // GEO3D：当前生效几何 —— applyBody 依据比例派生写入；全部为 1 时逐字段严格等于
+  //        旧硬编码字面量（官方观感像素级不变）。骨骼 / 渲染 / IK / 缩略图均读 GEO3D，
+  //        体型改一处全局生效。派生公式在 f=1 时只做 ×1 与 ±0 运算，不引入浮点误差。
+  var BODY_BASE = {
     headW: 370, headH: 316, headD: 336, headY: -233.5,
     screenW: 274, screenH: 216, screenTopOff: 53,
     // v1.6.1：屏幕玻璃从「单面贴图」改为「有厚度的深色实体」，外廓与边框外框同大、
@@ -359,7 +367,13 @@
     // v1.6.2：边框要「任何角度都看得见」，光靠前脸薄板不行——转到 90° 前脸投影面积为 0 就整圈消失了。
     // 因此边框改成真正有厚度的框条（纵深 20：从前脸内 8 一直到凸出端 12），比玻璃更靠外，
     // 玻璃外廓再向内缩 glassInset（3）；侧视角于是读到「浅色边框包着深色屏体」的实体断面。
-    bezelPad: 5, bezelProtrude: 12, bezelDepth: 20, bezelRecess: 4, glassInset: 3, glassDepth: 34,
+    // v1.7.1：边框纵深 20 → 26（前表面位置不变，向头部内侧多嵌 6），
+    // 保证任何视角下边框都与脸面体积重叠，不会出现「边框浮在脸外」的缝。
+    // v1.7.3：玻璃纵深 34 → 22，让玻璃的 z 范围完全落在边框纵深之内（玻璃 154~176 / 边框 154~180）。
+    // 否则转角约 50° 以上时，玻璃左侧壁会比边框多露出 (34-26)×sinθ ≈ 7 的投影，
+    // 在边框与机身之间形成一条 10px 的深色竖带——这就是被读成「缝隙」的那条暗线。
+    // v1.8.0：边框 / 玻璃 / 缺角均为结构特征件，尺寸固定，不随体型缩放。
+    bezelPad: 5, bezelProtrude: 12, bezelDepth: 26, bezelRecess: 4, glassInset: 3, glassDepth: 22,
     // 缺角整体落在「脸面边框」里：脸边到屏幕板边的间距 43，缺口宽 40、高 38，
     // 与屏幕板左边/下沿各留 3~4 的空隙，保证屏幕板（含凸出台阶）完全不遮挡缺角
     notchW: 40, notchH: 38, notchD: 58,
@@ -369,6 +383,94 @@
     hipX: 42, hipY: 74, legW: 41, legD: 58, legLen: 102,
     footW: 36, footH: 8, footD: 142
   };
+  // 十项比例：头三围 / 屏幕占比 / 躯干宽长 / 四肢粗细 / 臂长 / 腿长 / 脚掌长度
+  var BODY_REST = { headW: 1, headH: 1, headD: 1, screen: 1, torsoW: 1, torsoH: 1,
+    limb: 1, armLen: 1, legLen: 1, foot: 1 };
+  var GEO3D = {};           // 当前生效几何（applyBody 派生写入；调试句柄引用同一对象）
+  var CAM_OFFICIAL = null;   // 官方构图的头顶/脚底投影锚点（首次 applyBody 时记录，用于取景自适应）
+  function bodyClone(f) {
+    var o = {}, k;
+    for (k in BODY_REST) o[k] = f && f[k] !== undefined ? +f[k] : BODY_REST[k];
+    return o;
+  }
+  // 比例只接受滑杆范围内的数值（导入的 JSON / 旧存档一并钳制）
+  function bodyFactorClamp(key, v) {
+    for (var i = 0; i < BODY_SLIDER_DEFS.length; i++) {
+      var d = BODY_SLIDER_DEFS[i];
+      if (d[0] === key) return Math.max(d[2], Math.min(d[3], +v || 1));
+    }
+    return 1;
+  }
+  function bodySanitize(f) {
+    var o = bodyClone();
+    for (var k in o) o[k] = bodyFactorClamp(k, f && f[k]);
+    return o;
+  }
+  function bodyEq(a, b) {
+    return Object.keys(BODY_REST).every(function (k) { return +a[k] === +b[k]; });
+  }
+  // 站立姿态下角色头顶 / 脚底的世界坐标 y（bounce=0，不含呼吸与跳动）
+  function bodyExtents() {
+    return [GEO3D.headY - GEO3D.headH / 2, GEO3D.hipY + GEO3D.legLen + GEO3D.footH * 2];
+  }
+  // 取景自适应（v1.8.0）：超高体型把全身投影高度压回官方构图高度（等比缩 zoom），
+  // 再把头顶锚定到官方头顶位置；官方体型 zoom/cy 一步不动（保证像素级不变）。
+  function fitCamera() {
+    var ext = bodyExtents();
+    if (!CAM_OFFICIAL) {   // 首次调用 = 官方体型：只记录锚点，CAM 维持源码标定值
+      CAM_OFFICIAL = { top: projectV([0, ext[0], 0])[1], bottom: projectV([0, ext[1], 0])[1] };
+      return;
+    }
+    CAM.zoom = 1.36; CAM.cy = 660;
+    var t = projectV([0, ext[0], 0])[1], b = projectV([0, ext[1], 0])[1];
+    var fit = CAM_OFFICIAL.bottom - CAM_OFFICIAL.top;
+    if (b - t > fit) {
+      CAM.zoom = 1.36 * fit / (b - t);
+      t = projectV([0, ext[0], 0])[1];
+    }
+    CAM.cy = 660 + (CAM_OFFICIAL.top - t);
+  }
+  // 体型 → 几何：直接量 = 基准 × 比例（IEEE 的 ×1 精确不变）；联动量用「基准 + Δ」形式；
+  // 官方档逐字段等于 BODY_BASE。屏幕占比受缺角硬约束：左缘给缺角留缝、下缘不越过缺角顶。
+  function applyBody(f) {
+    f = f || (S && S.body) || BODY_REST;
+    var B = BODY_BASE;
+    GEO3D.headW = B.headW * f.headW;
+    GEO3D.headH = B.headH * f.headH;
+    GEO3D.headD = B.headD * f.headD;
+    // 屏幕：随头部三围整体缩放，再乘占比比例；占比过大时按缺角边界收口
+    GEO3D.screenW = Math.min(B.screenW * f.screen * f.headW, GEO3D.headW - B.notchW - 32);
+    GEO3D.screenH = Math.min(B.screenH * f.screen * f.headH, GEO3D.headH - B.notchH * 2 - 22);
+    GEO3D.screenTopOff = (GEO3D.headH - GEO3D.screenH) / 2 + 3;   // 官方：垂直略偏下（53 = 50 + 3）
+    GEO3D.notchW = B.notchW; GEO3D.notchH = B.notchH; GEO3D.notchD = B.notchD;
+    GEO3D.bezelPad = B.bezelPad; GEO3D.bezelProtrude = B.bezelProtrude; GEO3D.bezelDepth = B.bezelDepth;
+    GEO3D.bezelRecess = B.bezelRecess; GEO3D.glassInset = B.glassInset; GEO3D.glassDepth = B.glassDepth;
+    GEO3D.torsoW = B.torsoW * f.torsoW;
+    GEO3D.torsoH = B.torsoH * f.torsoH;
+    GEO3D.torsoD = B.torsoD * f.torsoW;   // 厚度随躯干宽（围度）联动
+    GEO3D.torsoOy = B.torsoOy;
+    GEO3D.armW = B.armW * f.limb;
+    GEO3D.armLen = B.armLen * f.armLen;
+    GEO3D.handW = GEO3D.armW * 2;          // 官方关系：手宽 = 2×臂宽、手厚随臂厚
+    GEO3D.handD = GEO3D.armW * 2 - 2;
+    GEO3D.handH = B.handH;
+    GEO3D.legW = B.legW * f.limb;
+    GEO3D.legD = B.legD * f.limb;
+    GEO3D.legLen = B.legLen * f.legLen;
+    GEO3D.footW = GEO3D.legW - 5;          // 官方关系：脚宽 = 腿宽 - 5
+    GEO3D.footH = B.footH;
+    GEO3D.footD = B.footD * f.foot;
+    // 关节位置随躯干 / 头联动（官方关系：肩X = 躯干半宽+臂半宽+11、肩Y = 躯干顶+5、
+    // 髋Y = 躯干半高-7、髋X = 0.24×躯干宽、颈部咬合 5.5）
+    GEO3D.shoulderX = B.shoulderX + (GEO3D.torsoW - B.torsoW) / 2 + (GEO3D.armW - B.armW) / 2;
+    GEO3D.shoulderY = B.shoulderY - (GEO3D.torsoH - B.torsoH) / 2;
+    GEO3D.hipX = B.hipX + (GEO3D.torsoW - B.torsoW) * 0.24;
+    GEO3D.hipY = B.hipY + (GEO3D.torsoH - B.torsoH) / 2;
+    GEO3D.headY = B.headY - (GEO3D.torsoH - B.torsoH) / 2 - (GEO3D.headH - B.headH) / 2;
+    fitCamera();
+    return GEO3D;
+  }
+  applyBody(BODY_REST);   // 模块加载即派生官方几何（此帧同时记录 CAM_OFFICIAL 锚点）
 
   var REST_RIG = {
     bodyYaw: 0, bodyPitch: 0, bodyRoll: 0, headYaw: 0, headPitch: 0,
@@ -377,8 +479,32 @@
   };
   function rigClone(r) { var o = {}, k; for (k in REST_RIG) o[k] = (r && r[k]) || 0; return o; }
 
-  // 姿势 = 骨骼角度组（手绘模型，MC 式单段肢体：只有肩摆 / 髋摆，没有肘膝）
-  // 全部姿势均为程序绘制，官方 PNG 仅作底部参考图，不进入生成链路
+  // v1.7.0：部位附加变换叠加在原骨骼之上；左右上臂 / 前臂 / 手 / 腿 / 脚均可独立选择
+  var PART_DEFS = [
+    { id: 'head', label: '头部' }, { id: 'neck', label: '颈部' }, { id: 'torso', label: '躯干' },
+    { id: 'armL', label: '左上臂' }, { id: 'forearmL', label: '左前臂' }, { id: 'handL', label: '左手' },
+    { id: 'armR', label: '右上臂' }, { id: 'forearmR', label: '右前臂' }, { id: 'handR', label: '右手' },
+    { id: 'legL', label: '左腿' }, { id: 'footL', label: '左脚' },
+    { id: 'legR', label: '右腿' }, { id: 'footR', label: '右脚' }
+  ];
+  var PART_REST = { scale: 1, rx: 0, ry: 0, rz: 0, x: 0, y: 0, z: 0 };
+  function partClone(p) {
+    var o = {}, k;
+    for (k in PART_REST) o[k] = p && p[k] !== undefined ? +p[k] : PART_REST[k];
+    return o;
+  }
+  function createPartStates(src) {
+    var o = {};
+    PART_DEFS.forEach(function (d) { o[d.id] = partClone(src && src[d.id]); });
+    return o;
+  }
+  function isPartRest(p) {
+    if (!p) return true;
+    return Object.keys(PART_REST).every(function (k) { return +p[k] === PART_REST[k]; });
+  }
+
+  // 姿势 = 原骨骼角度组（肩摆 / 髋摆）；v1.7 的肘部弯曲由部位附加变换独立驱动
+  // 全部姿势均为程序绘制，底部自绘参考图仅作展示，不进入生成链路
   var RIG_POSES = {
     pstand: { label: '站立', rig: rigClone(REST_RIG) },
     pwave: { label: '打招呼', rig: Object.assign(rigClone(REST_RIG), { lArmSide: 120, lArmFront: 12, headYaw: -8, bodyRoll: -3 }) },
@@ -406,15 +532,20 @@
   function buildSkeleton(rig) {
     var g = GEO3D, R = Math.PI / 180; // 骨骼角度单位 = 度
     // 外壳配色（v1.5.0）：手 / 脚沿用官方「比本肢略亮」的关系，缺口阴影按头色等比压暗
-    var P = S.skin || SKIN_OFFICIAL;
+    var P = S.skin || SKIN_OFFICIAL, parts = S.parts || createPartStates();
     // v1.6.0：缺口阴影片对比度收窄（.78 → .86），避免斜视角下读成「内部黑洞」
     var handCol = skinMix(P.arm, 1.16), footCol = skinMix(P.leg, 1.19), notchCol = skinMix(P.head, .86);
-    var torso = { pos: [0, rig.bounce || 0, 0], rot: [rig.bodyPitch * R, rig.bodyYaw * R, rig.bodyRoll * R] };
+    var torso = { part: 'torso', pos: [0, rig.bounce || 0, 0], rot: [rig.bodyPitch * R, rig.bodyYaw * R, rig.bodyRoll * R] };
     // 屏幕装配件：环形边框（凸出前脸）+ 凹槽内的深色玻璃实体 + 贴在前面的表情面
     var sy0 = -g.headH / 2 + g.screenTopOff;
     var bzW = g.screenW + g.bezelPad * 2;
+    // 颈部是头身连接节点。代理盒只用于点选 / 高亮，不参与实体绘制，默认外观与 v1.6.2 完全一致。
+    var neck = {
+      part: 'neck', pos: [0, g.headY, 0], rot: [0, 0, 0],
+      boxes: [{ s: [46, 6, 46], o: [0, g.headH / 2, 0], col: P.torso, proxy: true, pick: 2 }]
+    };
     var head = {
-      pos: [0, g.headY, 0], rot: [rig.headPitch * R, rig.headYaw * R, 0],
+      part: 'head', pos: [0, 0, 0], rot: [rig.headPitch * R, rig.headYaw * R, 0],
       boxes: [
         // 主头盒：整块长方体，底面止于缺角顶（edge:'self' 消除拼块接缝线，读作一整块）
         { s: [g.headW / 2, (g.headH - g.notchH) / 2, g.headD / 2],
@@ -433,65 +564,112 @@
           col: notchCol },
         // 屏幕边框（v1.6.1）：由「一块实心盒子」改为「环形四条边」，只占最外 8 深（前沿薄板），
         // 中间留出真正的凹槽；配合下方同外廓的玻璃实体，凸出部分的内侧是深色屏体。
+        // v1.7.2：四条边框改用面色描边（edge:'self'）。深色描边压在边框与头前脸的交界上，
+        // 会被读成「边框没有贴住脸、中间有一条缝」；同色描边让边框从脸面平滑长出。
         { s: [bzW / 2, g.bezelPad / 2, g.bezelDepth / 2],
           o: [0, sy0 - g.bezelPad / 2, g.headD / 2 + g.bezelProtrude - g.bezelDepth / 2],
-          col: P.bezel, front: 1 },
+          col: P.bezel, front: 1, edge: 'self' },
         { s: [bzW / 2, g.bezelPad / 2, g.bezelDepth / 2],
           o: [0, sy0 + g.screenH + g.bezelPad / 2, g.headD / 2 + g.bezelProtrude - g.bezelDepth / 2],
-          col: P.bezel, front: 1 },
+          col: P.bezel, front: 1, edge: 'self' },
         { s: [(bzW - g.screenW) / 4, g.screenH / 2, g.bezelDepth / 2],
           o: [-(bzW + g.screenW) / 4, sy0 + g.screenH / 2, g.headD / 2 + g.bezelProtrude - g.bezelDepth / 2],
-          col: P.bezel, front: 1 },
+          col: P.bezel, front: 1, edge: 'self' },
         { s: [(bzW - g.screenW) / 4, g.screenH / 2, g.bezelDepth / 2],
           o: [(bzW + g.screenW) / 4, sy0 + g.screenH / 2, g.headD / 2 + g.bezelProtrude - g.bezelDepth / 2],
-          col: P.bezel, front: 1 },
+          col: P.bezel, front: 1, edge: 'self' },
         // 屏幕玻璃（v1.6.1 实体化；v1.6.2 外廓内缩 glassInset，让边框侧壁露在它外侧）：
-        // 纵深 34、前表面比边框前沿内凹 4，正面藏在边框框条后面（观感不变），
-        // 侧视角露出深色屏体，与外侧的边框色框条形成「框 + 屏」的实体断面。
+        // 前表面比边框前沿内凹 4，正面藏在边框框条后面（观感不变）；
+        // v1.7.3 起纵深收窄到 22，与边框后缘齐平，任何转角下玻璃侧壁都不会露出边框之外。
         { s: [(bzW - g.glassInset * 2) / 2, (g.screenH + g.bezelPad * 2 - g.glassInset * 2) / 2, g.glassDepth / 2],
           o: [0, sy0 + g.screenH / 2,
               g.headD / 2 + g.bezelProtrude - g.bezelRecess - g.glassDepth / 2],
-          col: '#161b18', front: 0.6 }
+          col: '#161b18', front: 0.6, edge: 'self' }
       ]
     };
-    // 手臂：单段刚体（肩关节摆动），末端挂手部薄块，不做肘弯
-    // v1.6.0：删除「肩关节填充」盒体——它上探到关节以上 30，位置又在躯干外侧，
-    // 转身 / 斜视角时整块露出轮廓外，正是「骨骼外露」的来源；根缝实际由头部体积遮住
+    // 静止时仍绘制 v1.6.2 的原始整臂网格，并用两个不绘制的代理盒区分上臂 / 前臂点选；
+    // 只有前臂发生局部调整时才切换成分段实体，既保留默认像素，也允许真实肘部形变。
     function arm(side, sV, fV) {
-      return {
+      var suffix = side < 0 ? 'L' : 'R', joinRest = isPartRest(parts['forearm' + suffix]);
+      var upper = {
+        part: 'arm' + suffix,
         pos: [side * g.shoulderX, g.shoulderY, 0], rot: [fV * R, 0, (side < 0 ? sV : -sV) * R],
         boxes: [
-          { s: [g.armW, g.armLen / 2, g.armW + 15], o: [0, g.armLen / 2, 0], col: P.arm }
-        ],
-        children: [{
-          pos: [0, g.armLen - 2, 0],
-          boxes: [{ s: [g.handW / 2, g.handH, g.handD / 2], o: [0, 2, 0], col: handCol }]
-        }]
+          { s: [g.armW, g.armLen / 2, g.armW + 15], o: [0, g.armLen / 2, 0], col: P.arm,
+            joinRest: joinRest, mergedRest: true, noPick: true },
+          { s: [g.armW, g.armLen / 4, g.armW + 15], o: [0, g.armLen / 4, 0], col: P.arm,
+            joinRest: joinRest, splitPart: true },
+          { s: [g.armW, g.armLen / 4, g.armW + 15], o: [0, g.armLen / 4, 0], col: P.arm,
+            joinRest: joinRest, restProxy: true, proxy: true }
+        ]
       };
+      var hand = {
+        part: 'hand' + suffix, pos: [0, g.armLen / 2 - 2, 0], rot: [0, 0, 0],
+        boxes: [{ s: [g.handW / 2, g.handH, g.handD / 2], o: [0, 2, 0], col: handCol }]
+      };
+      upper.children = [{
+        part: 'forearm' + suffix, pos: [0, g.armLen / 2, 0], rot: [0, 0, 0],
+        boxes: [
+          // v1.7.1：前臂实体盒向肘部内侧延伸 8，与前臂旋转产生的楔形缺口重叠，避免弯肘露缝
+          { s: [g.armW, g.armLen / 4 + 7, g.armW + 15], o: [0, g.armLen / 4 - 9, 0], col: P.arm,
+            joinRest: joinRest, splitPart: true },
+          { s: [g.armW, g.armLen / 4 + 7, g.armW + 15], o: [0, g.armLen / 4 - 9, 0], col: P.arm,
+            joinRest: joinRest, restProxy: true, proxy: true }
+        ],
+        children: [hand]
+      }];
+      return upper;
     }
     // 腿：单段刚体（髋关节前后摆 + 侧摆），脚掌挂在腿末端一起转，不做膝弯
     // v1.6.0：同理删除「髋关节填充」盒体（上端外露到躯干下沿之外）
     function leg(side, fV, sV) {
+      var suffix = side < 0 ? 'L' : 'R';
       return {
+        part: 'leg' + suffix,
         pos: [side * g.hipX, g.hipY, 0], rot: [fV * R, 0, (side < 0 ? sV : -sV) * R],
-        boxes: [
-          { s: [g.legW, g.legLen / 2, g.legD], o: [0, g.legLen / 2, 0], col: P.leg }
-        ],
+        boxes: [{ s: [g.legW, g.legLen / 2, g.legD], o: [0, g.legLen / 2, 0], col: P.leg }],
         children: [{
-          pos: [0, g.legLen, 0],
-          boxes: [{ s: [g.footW, g.footH, g.footD / 2], o: [0, 8, 10], col: footCol }]
+          part: 'foot' + suffix, pos: [0, g.legLen, 0], rot: [0, 0, 0],
+          // v1.7.1：脚掌向上延伸到腿内 8（默认被腿体积遮住，观感不变），脚掌单独旋转时不再露缝
+          boxes: [{ s: [g.footW, g.footH + 4, g.footD / 2], o: [0, 4, 10], col: footCol }]
         }]
       };
     }
+    neck.children = [head];
     torso.children = [
-      head,
+      neck,
       arm(-1, rig.lArmSide, rig.lArmFront),
       arm(1, rig.rArmSide, rig.rArmFront),
       leg(-1, rig.lLegFront, rig.lLegSide),
       leg(1, rig.rLegFront, rig.rLegSide),
-      { pos: [0, 0, 0], rot: [0, 0, 0], boxes: [{ s: [g.torsoW / 2, g.torsoH / 2, g.torsoD / 2], o: [0, g.torsoOy, 0], col: P.torso }] }
+      // 躯干实体保持在原来的收集顺序末尾；根节点已承担部位变换，这里不再重复叠加。
+      { part: 'torso', noAdj: true, pos: [0, 0, 0], rot: [0, 0, 0],
+        boxes: [{ s: [g.torsoW / 2, g.torsoH / 2, g.torsoD / 2], o: [0, g.torsoOy, 0], col: P.torso }] }
     ];
-    return { root: torso, head: head, handL: torso.children[1].children[0] };
+    var nodes = {};
+    (function mapNodes(node) {
+      if (node.part) nodes[node.part] = node;
+      (node.children || []).forEach(mapNodes);
+    })(torso);
+    return { root: torso, head: head, handL: nodes.handL, nodes: nodes };
+  }
+
+  // 原骨骼矩阵之后叠加部位局部 T × R × S；父级变换自然带动全部子级。
+  function updateSkeletonMatrices(sk) {
+    (function traverse(node, pm) {
+      var rot = node.rot || [0, 0, 0];
+      var local = mMul(mT(node.pos), mMul(mRX(rot[0]), mMul(mRY(rot[1]), mRZ(rot[2]))));
+      var p = !node.noAdj && node.part && S.parts && S.parts[node.part];
+      if (p) {
+        var adj = mMul(mT([p.x, p.y, p.z]),
+          mMul(mRX(p.rx * Math.PI / 180), mMul(mRY(p.ry * Math.PI / 180),
+            mMul(mRZ(p.rz * Math.PI / 180), mS(p.scale)))));
+        local = mMul(local, adj);
+      }
+      node._m = mMul(pm, local);
+      (node.children || []).forEach(function (c) { traverse(c, node._m); });
+    })(sk.root, mIdent0());
+    return sk;
   }
 
   var FACE_DEFS = [
@@ -555,10 +733,17 @@
         var ctr = [(c[fd[0][0]][0] + c[fd[0][1]][0] + c[fd[0][2]][0] + c[fd[0][3]][0]) / 4,
                    (c[fd[0][0]][1] + c[fd[0][1]][1] + c[fd[0][2]][1] + c[fd[0][3]][1]) / 4,
                    (c[fd[0][0]][2] + c[fd[0][1]][2] + c[fd[0][2]][2] + c[fd[0][3]][2]) / 4];
-        var nV = V3.rotX(nW, CAM.pitch);
+        // v1.7.1：与角色面统一口径（法线归一化 + 投影面积兜底），否则道具仍会边角消失
+        var nV = V3.rotX(V3.norm(nW), CAM.pitch);
         var vDir = V3.norm([ctr[0], ctr[1], ctr[2] - CAM.D]);
-        if (V3.dot(nV, vDir) > 0.001) return;
+        if (V3.dot(nV, vDir) > 0.05) return;
         var pts = fd[0].map(function (i) { return projectV(c[i]); });
+        var a2 = 0;
+        for (var q = 0; q < 4; q++) {
+          var pa = pts[q], pb = pts[(q + 1) % 4];
+          a2 += pa[0] * pb[1] - pb[0] * pa[1];
+        }
+        if (a2 < 2) return;
         var lum = LUM_A + LUM_D * Math.max(0, V3.dot(nW, LIGHT));
         // 道具与角色共用同一排序口径（最近点），否则马身 / 桌面会和腿面比错量纲
         faces.push({ pts: pts, col: shadeHex(box.col, lum),
@@ -566,6 +751,8 @@
       });
     });
   }
+
+  var PART_FACE_CACHE = [];   // 主预览的可见部位面：用于点选与预览层高亮（导出画布不覆盖）
 
   function renderProcedural(ctx, s, deviceScale, rigArg, faceArg) {
     var rig = rigArg || S.rig || REST_RIG;
@@ -593,12 +780,7 @@
     ctx.ellipse(CAM.cx + 88 * CAM.zoom, groundY + 8, 240 * CAM.zoom / 1.38, 24 * CAM.zoom / 1.38, 0, 0, 7);
     ctx.fill();
 
-    var sk = buildSkeleton(rig);
-    (function traverse(node, pm) {
-      var rot = node.rot || [0, 0, 0];
-      node._m = mMul(pm, mMul(mT(node.pos), mMul(mRX(rot[0]), mMul(mRY(rot[1]), mRZ(rot[2])))));
-      (node.children || []).forEach(function (c) { traverse(c, node._m); });
-    })(sk.root, mIdent0());
+    var sk = updateSkeletonMatrices(buildSkeleton(rig));
 
     // 屏幕装配件（边框 + 玻璃）贴在头前脸上，排序必须排在「头正面」之后。
     // 头正面是个大四边形，转角后它离相机最近的那个角 z 会远大于屏幕件自身四角的 z，
@@ -613,6 +795,10 @@
     var faces = [];
     (function collect(node) {
       (node.boxes || []).forEach(function (box) {
+        // 静止：原始整臂 + 分段选择代理；前臂调整后：分段实体，代理与整臂退场。
+        if (box.mergedRest && !box.joinRest) return;
+        if (box.splitPart && box.joinRest) return;
+        if (box.restProxy && !box.joinRest) return;
         var s3 = box.s, o = box.o, c = [];
         for (var i = 0; i < 8; i++) {
           c.push(applyM(node._m, [o[0] + (i & 1 ? s3[0] : -s3[0]), o[1] + (i & 2 ? s3[1] : -s3[1]), o[2] + (i & 4 ? s3[2] : -s3[2])]));
@@ -622,10 +808,20 @@
           var ctr = [(c[fd[0][0]][0] + c[fd[0][1]][0] + c[fd[0][2]][0] + c[fd[0][3]][0]) / 4,
                      (c[fd[0][0]][1] + c[fd[0][1]][1] + c[fd[0][2]][1] + c[fd[0][3]][1]) / 4,
                      (c[fd[0][0]][2] + c[fd[0][1]][2] + c[fd[0][2]][2] + c[fd[0][3]][2]) / 4];
-          var nV = V3.rotX(nW, CAM.pitch);
+          // v1.7.1：法线先归一化。部位整体缩放会等比例放大法线长度，dot 随之放大，
+          // 放大后的部件「接近垂直」的面就会被 0.001 阈值误判成背面，整块薄片凭空消失。
+          var nV = V3.rotX(V3.norm(nW), CAM.pitch);
           var vDir = V3.norm([ctr[0], ctr[1], ctr[2] - CAM.D]); // 相机在 +z
-          if (V3.dot(nV, vDir) > 0.001) return; // 背面剔除
+          if (V3.dot(nV, vDir) > 0.05) return;   // 明确背面才快速剔除
           var pts = fd[0].map(function (i) { return projectV(c[i]); });
+          // 投影有向面积兜底（与 v1.6.1 屏幕判据同口径）：dot 落在 0~0.05 的临界薄面
+          // 靠面积判断，避免「侧视角手 / 脚 / 边框整块消失」，也保证收窄是连续的。
+          var area2 = 0;
+          for (var q = 0; q < 4; q++) {
+            var pa2 = pts[q], pb2 = pts[(q + 1) % 4];
+            area2 += pa2[0] * pb2[1] - pb2[0] * pa2[1];
+          }
+          if (area2 < 2) return;
           var lum = LUM_A + LUM_D * Math.max(0, V3.dot(nW, LIGHT));
           // v1.6.0：排序键取「该面在相机方向的最近点」(max z)，而非面中心。
           // 按面中心排序时，大面（如头侧壁，中心 z≈0）会被整体画在贴近它的近侧面（举手手臂，z≈44）之后，
@@ -635,7 +831,8 @@
           // front 值就是这个下限台阶：边框薄板 1、玻璃实体 0.6 —— 台阶差保留了「边框压在玻璃之前」
           // 的真实前后关系（否则两者被钳到同一个 z，稳定排序会让后插入的玻璃前脸盖掉整圈边框）。
           if (box.front) zNear = Math.max(zNear, headFrontZ + box.front);
-          faces.push({ pts: pts, col: shadeHex(box.col, lum), z: zNear, edge: box.edge });
+          faces.push({ pts: pts, col: shadeHex(box.col, lum), z: zNear, edge: box.edge,
+            part: box.noPick ? null : node.part, proxy: !!box.proxy, pick: box.pick || 0 });
         });
       });
       (node.children || []).forEach(collect);
@@ -665,14 +862,16 @@
       // 屏幕排序锚定：取屏幕四角与头正面（headFrontZ）的最大 z，再越过凸出的边框前沿，
       // 保证表情面永远压在边框薄板与玻璃实体之上。
       var scrNear = Math.max(sq[0][2], sq[1][2], sq[2][2], sq[3][2]);
-      faces.push({ screen: true, pts: sp, z: Math.max(scrNear, headFrontZ) + g.bezelProtrude + 4 });
+      faces.push({ screen: true, part: 'head', pts: sp, z: Math.max(scrNear, headFrontZ) + g.bezelProtrude + 4 });
     }
 
     // 场景道具（桌子/笔记本/马等，世界坐标系，不随角色转动）
     collectProps(faces, S.pose);
 
     faces.sort(function (a, b) { return a.z - b.z; }); // 远（z 小）先画
+    if (ctx === stageCtx) PART_FACE_CACHE = faces;
     faces.forEach(function (f) {
+      if (f.proxy) return;                 // 颈部等连接节点只提供点选代理，不改变默认实体外观
       if (f.screen) {
         applyFace(ctx, f.pts, { face: faceArg || S.face, cover: true, coverColor: '#161b18', glowScale: NOGLOW ? 0 : deviceScale, persp: true });
         ctx.save();
@@ -690,6 +889,11 @@
       ctx.closePath();
       ctx.fillStyle = f.col;
       ctx.fill();
+      // v1.7.1：先按面色外扩半像素描边，填平相邻面在斜视角拼合处的亚像素缝
+      // （侧视 / 抬手时出现的细黑线），再叠深色描边保留块与块的转折
+      ctx.strokeStyle = f.col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
       // edge:'self' = 用面色描边（盖住拼块接缝的毛边，同时不画出内部接缝线）；
       // 缺省 = 深色描边，勾勒块与块的转折
       ctx.strokeStyle = f.edge === 'self' ? f.col : 'rgba(0,0,0,.16)';
@@ -702,9 +906,10 @@
       var handP = projectV(applyM(sk.handL._m, [0, 2, 0]));
       ctx.strokeStyle = 'rgba(159,247,228,.9)';
       ctx.lineWidth = 7; ctx.lineCap = 'round';
+      // v1.7.1：弧线整体外移 12，避免与手臂 / 头部围出一小块封闭空白（上举时被读成「缝隙」）
       for (var i = 0; i < 3; i++) {
         ctx.beginPath();
-        ctx.arc(handP[0] - 50 - i * 17, handP[1] - 12 - i * 7, 14 + i * 5, Math.PI * .75, Math.PI * 1.45);
+        ctx.arc(handP[0] - 62 - i * 17, handP[1] - 18 - i * 7, 14 + i * 5, Math.PI * .75, Math.PI * 1.45);
         ctx.stroke();
       }
     }
@@ -841,6 +1046,8 @@
   /* ---------------- 状态 ---------------- */
   var S = {
     pose: 'pstand', face: 'normal', bg: 'none', rig: null,
+    parts: createPartStates(), selPart: null,          // v1.7.0：各部位局部尺寸 / 角度 / 位移与选中态
+    body: bodyClone(),                                  // v1.8.0：全身体型比例（十项，1 = 官方标准）
     text: { content: '', pos: 'bottom', style: 'meme', color: '#ffffff', size: 1 },
     stickerItems: [], selSticker: null,          // 贴纸实例（数组顺序 = 层级顺序，由底到顶）
     bgFit: 'cover', bgOffX: 0, bgOffY: 0,   // 自定义背景：显示方式与位置微调（% of 画布）
@@ -1444,14 +1651,17 @@
   function render(ctx, s, ui, t) {
     ctx.clearRect(0, 0, s, s);
     renderBg(ctx, S.bg, s);
-    // 全部姿势均走手绘 3D 管线，官方 PNG 仅作底部参考，不进入生成
+    // 全部姿势均走手绘 3D 管线，底部自绘参考图仅作展示，不进入生成
     if (PROC_POSES[S.pose]) {
       var rig = (t == null) ? (S.rig || REST_RIG) : effectiveRig(t);
       renderProcedural(ctx, s, undefined, rig, t == null ? null : effectiveFace(t));
     }
     renderStickers(ctx, s, ui);
     renderText(ctx, s);
-    if (ui) drawIkOverlay(ctx, s);   // 肢体手柄高亮只在预览层，导出不含
+    if (ui) {
+      drawPartOverlay(ctx, s);       // v1.7.0：部位选中高亮只在预览层
+      drawIkOverlay(ctx, s);         // 肢体手柄高亮只在预览层，导出不含
+    }
   }
 
   var stage = document.getElementById('stage');
@@ -1541,8 +1751,20 @@
     return b;
   }
 
+  // 保存底部参考图：数据地址 → Blob → 本地下载
+  function saveGalleryImage(g) {
+    var m = /^data:image\/([a-z0-9+.-]+);base64,/i.exec(g.data || '');
+    var mime = m ? 'image/' + m[1].toLowerCase() : 'image/jpeg';
+    var ext = mime === 'image/jpeg' ? 'jpg' : mime.replace('image/', '');
+    var bin = atob((g.data || '').split(',')[1] || '');
+    var buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    download(new Blob([buf], { type: mime }), 'TRAE宝-' + g.label.replace(/·/g, '-') + '.' + ext);
+    toast('已保存参考图「' + g.label + '」');
+  }
+
   function buildOptions() {
-    // 全部姿势均为手绘 3D 模型（官方 PNG 仅作底部参考，不用于生成）
+    // 全部姿势均为手绘 3D 模型（底部参考图同为自绘图稿，不用于生成）
     var proc = document.getElementById('poseProc');
     Object.keys(PROC_POSES).forEach(function (id) {
       var b = optTile(buildPoseThumb(id), PROC_POSES[id].label, S.pose === id);
@@ -1614,14 +1836,18 @@
       b.onclick = function () { applyPreset(p); };
       pc.appendChild(b);
     });
-    // 参考图
+    // 参考图（自绘图稿，支持单张保存）
     var gal = document.getElementById('gallery');
     ASSETS.gallery.forEach(function (g) {
       var fig = document.createElement('figure');
       fig.className = 'g'; fig.style.margin = '0';
       var im = new Image(); im.src = g.data; im.alt = g.label; im.loading = 'lazy';
       var cap = document.createElement('figcaption'); cap.textContent = g.label;
-      fig.appendChild(im); fig.appendChild(cap);
+      var save = document.createElement('button');
+      save.type = 'button'; save.className = 'g-save'; save.textContent = '⬇ 保存';
+      save.title = '保存这张参考图（' + g.label + '）';
+      save.onclick = function () { saveGalleryImage(g); };
+      fig.appendChild(im); fig.appendChild(cap); fig.appendChild(save);
       gal.appendChild(fig);
     });
   }
@@ -2577,28 +2803,313 @@
       rigInputs[d[0]].val.textContent = Math.round(v) + '°';
     });
   }
+
+  /* ---------------- 指定部位调整（v1.7.0） ---------------- */
+  var PART_SLIDER_DEFS = [
+    ['scale', '整体尺寸', 0.5, 1.6, 0.05],
+    ['rx', '绕 X 轴旋转', -180, 180, 1], ['ry', '绕 Y 轴旋转', -180, 180, 1], ['rz', '绕 Z 轴旋转', -180, 180, 1],
+    ['x', '局部 X 位移', -120, 120, 1], ['y', '局部 Y 位移', -120, 120, 1], ['z', '局部 Z 位移', -120, 120, 1]
+  ];
+  var partInputs = {};
+  function partDef(id) {
+    for (var i = 0; i < PART_DEFS.length; i++) if (PART_DEFS[i].id === id) return PART_DEFS[i];
+    return null;
+  }
+  function partValueText(key, v) {
+    if (key === 'scale') return (+v).toFixed(2) + '×';
+    if (key === 'rx' || key === 'ry' || key === 'rz') return Math.round(v) + '°';
+    return String(Math.round(v));
+  }
+  function selectPart(id, reveal) {
+    if (id && !partDef(id)) return;
+    S.selPart = id || null;
+    syncPartUI();
+    if (reveal) activateTab('part');
+    repaint();
+  }
+  function buildPartUI() {
+    var chips = document.getElementById('partChips');
+    PART_DEFS.forEach(function (d) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.dataset.part = d.id; b.textContent = d.label;
+      b.onclick = function () { selectPart(d.id); };
+      chips.appendChild(b);
+    });
+    var grid = document.getElementById('partSliders');
+    PART_SLIDER_DEFS.forEach(function (d) {
+      var wrap = document.createElement('div'); wrap.className = 'rig-item';
+      var lab = document.createElement('label');
+      var name = document.createElement('span'); name.textContent = d[1];
+      var val = document.createElement('b');
+      lab.appendChild(name); lab.appendChild(val);
+      var input = document.createElement('input');
+      input.type = 'range'; input.min = d[2]; input.max = d[3]; input.step = d[4];
+      input.addEventListener('input', function () {
+        if (!S.selPart) return;
+        var v = +input.value;
+        S.parts[S.selPart][d[0]] = v;
+        val.textContent = partValueText(d[0], v);
+        document.getElementById('partReset').disabled = isPartRest(S.parts[S.selPart]);
+        syncPartResetState();
+        repaint();
+      });
+      wrap.appendChild(lab); wrap.appendChild(input); grid.appendChild(wrap);
+      partInputs[d[0]] = { input: input, val: val };
+    });
+    document.getElementById('partDeselect').onclick = function () { selectPart(null); };
+    document.getElementById('partReset').onclick = function () {
+      if (!S.selPart) return;
+      S.parts[S.selPart] = partClone();
+      syncPartUI(); repaint();
+    };
+    document.getElementById('partAllReset').onclick = function () {
+      if (!window.confirm('确定将所有部位的尺寸、角度和位移恢复默认吗？')) return;
+      S.parts = createPartStates();
+      syncPartUI(); repaint();
+    };
+    syncPartUI();
+  }
+  function syncPartResetState() {
+    var allRest = PART_DEFS.every(function (d) { return isPartRest(S.parts[d.id]); });
+    document.getElementById('partAllReset').disabled = allRest;
+  }
+  function syncPartUI() {
+    if (!partInputs.scale) return;
+    var id = S.selPart, def = partDef(id), p = id ? S.parts[id] : null;
+    document.getElementById('partSelName').textContent = def ? def.label : '未选择部位';
+    document.getElementById('partDeselect').disabled = !id;
+    document.getElementById('partReset').disabled = !id || isPartRest(p);
+    [].forEach.call(document.getElementById('partChips').children, function (b) {
+      b.classList.toggle('active', b.dataset.part === id);
+    });
+    PART_SLIDER_DEFS.forEach(function (d) {
+      var ref = partInputs[d[0]], v = p ? p[d[0]] : PART_REST[d[0]];
+      ref.input.disabled = !p; ref.input.value = v;
+      ref.val.textContent = partValueText(d[0], v);
+    });
+    syncPartResetState();
+  }
+
+  /* ---------------- 全身体型面板（v1.8.0） ---------------- */
+  var BODY_KEY = 'traeEmoji.body.v1';          // 当前体型比例
+  var BODY_SAVED_KEY = 'traeEmoji.bodySaved.v1'; // 命名保存的体型列表
+  var BODY_SAVED_MAX = 12;
+  var BODY_SLIDER_DEFS = [
+    ['headW', '头部 · 宽', .7, 1.4, .01], ['headH', '头部 · 高', .7, 1.4, .01], ['headD', '头部 · 深', .7, 1.4, .01],
+    ['screen', '屏幕 · 占比', .6, 1.12, .01],
+    ['torsoW', '躯干 · 宽', .7, 1.4, .01], ['torsoH', '躯干 · 长', .7, 1.4, .01],
+    ['limb', '四肢 · 粗细', .6, 1.6, .01], ['armLen', '手臂 · 长度', .7, 1.35, .01],
+    ['legLen', '腿 · 长度', .7, 1.35, .01], ['foot', '脚掌 · 长度', .7, 1.5, .01]
+  ];
+  // 预设只写与官方标准的偏差项（缺省 = 1）；官方标准为默认档
+  var BODY_PRESETS = [
+    { id: 'official', label: '官方标准', f: {} },
+    { id: 'chibi', label: 'Q版大头', f: { headW: 1.18, headH: 1.1, headD: 1.12, screen: 1.02,
+      torsoW: .92, torsoH: .84, limb: .9, armLen: .86, legLen: .8, foot: .88 } },
+    { id: 'tall', label: '高挑细身', f: { headW: .95, headH: .92, headD: .95, screen: .96,
+      torsoW: .9, torsoH: 1.12, limb: .92, armLen: 1.12, legLen: 1.3, foot: 1.06 } },
+    { id: 'strong', label: '壮实魁梧', f: { headW: .96, headH: .98, torsoW: 1.26, torsoH: 1.06,
+      limb: 1.42, armLen: 1.02, legLen: .98, foot: 1.16 } },
+    { id: 'mini', label: '迷你袖珍', f: { headW: .88, headH: .88, headD: .88, torsoW: .86, torsoH: .86,
+      limb: .86, armLen: .86, legLen: .86, foot: .86 } },
+    { id: 'bigscreen', label: '大屏旗舰', f: { headW: 1.1, headH: 1.06, headD: 1.04, screen: 1.12,
+      torsoW: 1.04, limb: 1.05, armLen: 1.05, foot: 1.04 } },
+    { id: 'longleg', label: '长腿仔', f: { headW: .98, headH: .96, legLen: 1.34, torsoH: .9, torsoW: .94,
+      limb: .94, armLen: 1.06, foot: 1.12 } },
+    { id: 'blocky', label: '方块厚实', f: { headW: 1.14, headH: 1.14, headD: 1.14,
+      torsoW: 1.12, torsoH: 1.12, limb: 1.12, foot: 1.05 } }
+  ];
+  var bodySaved = [];       // [{ name, f }]：命名保存的体型
+  var bodyInputs = {};
+  var bodyEl = {};
+  var bodyThumbTimer = 0;
+
+  function loadBody() {
+    try {
+      var raw = localStorage.getItem(BODY_KEY);
+      if (raw) S.body = bodySanitize(bodyClone(JSON.parse(raw)));
+    } catch (e) { /* 存储不可用则用默认值 */ }
+    applyBody(S.body);
+  }
+  function saveBody() {
+    try { localStorage.setItem(BODY_KEY, JSON.stringify(S.body)); } catch (e) { }
+  }
+  function loadBodySaved() {
+    bodySaved = [];
+    try {
+      var raw = localStorage.getItem(BODY_SAVED_KEY);
+      (JSON.parse(raw) || []).forEach(function (rec) {
+        if (rec && typeof rec.name === 'string' && rec.name.trim()) {
+          bodySaved.push({ name: rec.name.trim().slice(0, 12), f: bodySanitize(bodyClone(rec.f)) });
+        }
+      });
+    } catch (e) { /* 存储不可用则留空 */ }
+  }
+  function persistBodySaved() {
+    try { localStorage.setItem(BODY_SAVED_KEY, JSON.stringify(bodySaved.slice(0, BODY_SAVED_MAX))); } catch (e) { }
+  }
+
+  // 体型变化：派生几何 → 存本机 → 同步面板 → 重绘 → 防抖刷新 10 张姿势缩略图
+  function bodyChanged(label) {
+    applyBody(S.body);
+    saveBody();
+    syncBodyUI();
+    repaint();
+    clearTimeout(bodyThumbTimer);
+    bodyThumbTimer = setTimeout(refreshPoseThumbs, 160);
+    if (label) toast('已应用体型「' + label + '」');
+  }
+  function applyBodyPreset(p) {
+    S.body = bodySanitize(bodyClone(p.f));
+    bodyChanged(p.label);
+  }
+  // 随机体型：各项在 0.78 ~ 1.28 之间独立抽取（不越过滑杆范围，避免极端组合）
+  function randomBody() {
+    var f = bodyClone();
+    BODY_SLIDER_DEFS.forEach(function (d) {
+      var lo = Math.max(d[2], .78), hi = Math.min(d[3], 1.28);
+      f[d[0]] = Math.round((lo + Math.random() * (hi - lo)) * 100) / 100;
+    });
+    S.body = f;
+    bodyChanged('随机');
+  }
+  function saveCurrentBody() {
+    var name = (bodyEl.name.value || '').trim();
+    if (!name) { toast('先给体型起个名字'); bodyEl.name.focus(); return; }
+    saveBodyNamed(name, bodyClone(S.body));
+    bodyEl.name.value = '';
+    toast('已保存体型「' + name + '」');
+  }
+  function saveBodyNamed(name, f) {
+    for (var i = 0; i < bodySaved.length; i++) {
+      if (bodySaved[i].name === name) { bodySaved[i].f = bodySanitize(bodyClone(f)); persistBodySaved(); rebuildBodySavedUI(); syncBodyUI(); return; }
+    }
+    bodySaved.unshift({ name: name, f: bodySanitize(bodyClone(f)) });
+    if (bodySaved.length > BODY_SAVED_MAX) bodySaved.length = BODY_SAVED_MAX;
+    persistBodySaved();
+    rebuildBodySavedUI();
+    syncBodyUI();
+  }
+  function rebuildBodySavedUI() {
+    var wrap = document.getElementById('bodySaved');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!bodySaved.length) {
+      var tip = document.createElement('span');
+      tip.className = 'body-saved-empty';
+      tip.textContent = '还没有保存的体型';
+      wrap.appendChild(tip);
+      return;
+    }
+    bodySaved.forEach(function (rec) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.title = '点击应用「' + rec.name + '」';
+      var lab = document.createElement('span'); lab.textContent = rec.name;
+      var del = document.createElement('i'); del.className = 'chip-del'; del.textContent = '✕'; del.title = '删除';
+      del.onclick = function (e) {
+        e.stopPropagation();
+        bodySaved.splice(bodySaved.indexOf(rec), 1);
+        persistBodySaved(); rebuildBodySavedUI(); syncBodyUI();
+      };
+      b.appendChild(lab); b.appendChild(del);
+      b.onclick = function () { S.body = bodySanitize(bodyClone(rec.f)); bodyChanged(rec.name); };
+      wrap.appendChild(b);
+    });
+  }
+  // 导出：JSON 文件（含版本与名称，便于分享）
+  function exportBody() {
+    var data = { v: 1, app: 'traeEmoji', name: '我的体型', f: bodyClone(S.body) };
+    download(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'TRAE宝-体型.json');
+  }
+  // 导入：应用 + 存入「我的体型」；比例一律按滑杆范围钳制
+  function importBodyFile(file) {
+    var rd = new FileReader();
+    rd.onload = function () {
+      try {
+        var d = JSON.parse(rd.result);
+        var f = d && (d.f || d.body);
+        if (!f || typeof f !== 'object') throw new Error('缺少体型参数 f');
+        S.body = bodySanitize(bodyClone(f));
+        var name = d && typeof d.name === 'string' && d.name.trim() ? d.name.trim().slice(0, 12) : '导入的体型';
+        saveBodyNamed(name, S.body);
+        bodyChanged(name);
+      } catch (err) { toast('导入失败：' + (err && err.message || '文件格式不正确')); }
+    };
+    rd.onerror = function () { toast('导入失败：文件读取错误'); };
+    rd.readAsText(file);
+  }
+  function buildBodyUI() {
+    var grid = document.getElementById('bodySliders');
+    BODY_SLIDER_DEFS.forEach(function (d) {
+      var wrap = document.createElement('div'); wrap.className = 'rig-item';
+      var lab = document.createElement('label');
+      var name = document.createElement('span'); name.textContent = d[1];
+      var val = document.createElement('b'); val.textContent = '×1.00';
+      lab.appendChild(name); lab.appendChild(val);
+      var input = document.createElement('input');
+      input.type = 'range'; input.min = d[2]; input.max = d[3]; input.step = d[4]; input.value = 1;
+      input.addEventListener('input', function () {
+        S.body[d[0]] = +input.value;
+        val.textContent = '×' + (+input.value).toFixed(2);
+        bodyChanged();
+      });
+      wrap.appendChild(lab); wrap.appendChild(input);
+      grid.appendChild(wrap);
+      bodyInputs[d[0]] = { input: input, val: val };
+    });
+    var pres = document.getElementById('bodyPresets');
+    BODY_PRESETS.forEach(function (p) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.dataset.v = p.id; b.textContent = p.label;
+      b.onclick = function () { applyBodyPreset(p); };
+      pres.appendChild(b);
+    });
+    var rnd = document.createElement('button');
+    rnd.type = 'button'; rnd.className = 'chip'; rnd.dataset.v = 'random'; rnd.textContent = '🎲 随机体型';
+    rnd.onclick = randomBody;
+    pres.appendChild(rnd);
+    bodyEl.official = document.getElementById('bodyOfficial');
+    bodyEl.official.onclick = function () { S.body = bodyClone(); bodyChanged('官方标准'); };
+    bodyEl.name = document.getElementById('bodyName');
+    document.getElementById('bodySaveBtn').onclick = saveCurrentBody;
+    document.getElementById('bodyExport').onclick = exportBody;
+    bodyEl.file = document.getElementById('bodyFile');
+    document.getElementById('bodyImport').onclick = function () { bodyEl.file.value = ''; bodyEl.file.click(); };
+    bodyEl.file.addEventListener('change', function () {
+      if (this.files && this.files[0]) importBodyFile(this.files[0]);
+    });
+    rebuildBodySavedUI();
+    syncBodyUI();
+  }
+  function syncBodyUI() {
+    if (!bodyEl.official) return;   // 面板尚未构建
+    BODY_SLIDER_DEFS.forEach(function (d) {
+      var it = bodyInputs[d[0]], v = S.body[d[0]];
+      it.input.value = v;
+      it.val.textContent = '×' + (+v).toFixed(2);
+    });
+    [].forEach.call(document.getElementById('bodyPresets').children, function (b) {
+      var active = false;
+      for (var i = 0; i < BODY_PRESETS.length; i++) {
+        if (BODY_PRESETS[i].id !== b.dataset.v) continue;
+        active = bodyEq(S.body, bodySanitize(bodyClone(BODY_PRESETS[i].f)));
+        break;
+      }
+      b.classList.toggle('active', active);
+    });
+    bodyEl.official.disabled = bodyEq(S.body, BODY_REST);
+  }
+
   /* ---------------- 肢体拖拽 · IK 反解 ---------------- */
   // 画布上直接拖手 / 脚：在屏幕空间做数值反解（粗网格 + 逐级细化），
   // 解出的两角度直接写回 S.rig（与 13 个滑杆共用同一份状态，互相同步）；
   // 拖头 = 朝向增量（headYaw / headPitch），不做位置反解。
-  var RAD = Math.PI / 180;
   var ikDrag = null;    // 拖动中：{ def, offX, offY }
   var ikHover = null;   // 悬停 / 抓取中的手柄（IK_DEFS 项）
   var IK_ANCHOR = 0.02; // 反解惩罚项：同等命中时优先保留当前角度，避免拖动瞬间跳角
 
-  function torsoM(rig) {
-    return mMul(mT([0, rig.bounce || 0, 0]),
-      mMul(mRX((rig.bodyPitch || 0) * RAD),
-        mMul(mRY((rig.bodyYaw || 0) * RAD), mRZ((rig.bodyRoll || 0) * RAD))));
-  }
-  // 与 buildSkeleton 的 arm()/leg() 同构：T(关节) × RX(前后摆) × RZ(侧摆，按左右取符号)
-  function limbNodeM(rig, pos, front, side, sign) {
-    return mMul(torsoM(rig), mMul(mT(pos),
-      mMul(mRX(front * RAD), mRZ((sign < 0 ? side : -side) * RAD))));
-  }
-  function headNodeM(rig) {
-    return mMul(torsoM(rig), mMul(mT([0, GEO3D.headY, 0]),
-      mMul(mRX((rig.headPitch || 0) * RAD), mRY((rig.headYaw || 0) * RAD))));
+  function posedSkeleton(rig) {
+    return updateSkeletonMatrices(buildSkeleton(rig || S.rig || REST_RIG));
   }
 
   // 顺序即拾取优先级（hitLimb 自后向前）：手 / 脚优先，头部最后，避免举手时抢走头部手柄
@@ -2614,27 +3125,50 @@
     return [-180, 180];
   }
   // 手柄位置（1024 基准画布坐标）
-  function ikPos(def, rig) {
-    rig = rig || S.rig || REST_RIG;
-    if (def.kind === 'arm') {
-      var am = limbNodeM(rig, [def.sign * GEO3D.shoulderX, GEO3D.shoulderY, 0],
-        rig[def.keys[1]] || 0, rig[def.keys[0]] || 0, def.sign);
-      return projectV(applyM(am, [0, GEO3D.armLen, 0]));
-    }
-    if (def.kind === 'leg') {
-      var lm = limbNodeM(rig, [def.sign * GEO3D.hipX, GEO3D.hipY, 0],
-        rig[def.keys[1]] || 0, rig[def.keys[0]] || 0, def.sign);
-      return projectV(applyM(lm, [0, GEO3D.legLen + 8, 10]));   // 脚掌盒中心（与 leg() 的 children 偏移一致）
-    }
-    var hm = headNodeM(rig);
-    return projectV(applyM(hm, [0, -GEO3D.headH / 2 + GEO3D.screenTopOff + GEO3D.screenH / 2,
+  function ikPos(def, rig, sk) {
+    // IK 与实际渲染共用同一套部位矩阵，部位缩放 / 旋转 / 位移后手柄仍贴合目标。
+    sk = sk || posedSkeleton(rig);
+    var node = sk.nodes[def.id];
+    if (def.kind === 'arm') return projectV(applyM(node._m, [0, 2, 0]));
+    if (def.kind === 'leg') return projectV(applyM(node._m, [0, 8, 10]));
+    return projectV(applyM(sk.head._m, [0, -GEO3D.headH / 2 + GEO3D.screenTopOff + GEO3D.screenH / 2,
       GEO3D.headD / 2 + GEO3D.bezelProtrude]));   // 屏幕面中心
   }
   function hitLimb(cx, cy) {
-    var rig = S.rig || REST_RIG;
+    var rig = S.rig || REST_RIG, sk = posedSkeleton(rig);
     for (var i = IK_DEFS.length - 1; i >= 0; i--) {
-      var d = IK_DEFS[i], p = ikPos(d, rig);
+      var d = IK_DEFS[i], p = ikPos(d, rig, sk);
       if (Math.hypot(cx - p[0], cy - p[1]) <= d.r) return d;
+    }
+    return null;
+  }
+  function pointInPolygon(x, y, pts) {
+    var inside = false;
+    for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      var a = pts[i], b = pts[j];
+      if (((a[1] > y) !== (b[1] > y)) &&
+          (x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])) inside = !inside;
+    }
+    return inside;
+  }
+  function hitPart(cx, cy) {
+    var i, f, handId = null;
+    // 颈部连接区默认被头 / 躯干遮住，给小代理区独立的拾取优先级。
+    for (i = PART_FACE_CACHE.length - 1; i >= 0; i--) {
+      f = PART_FACE_CACHE[i];
+      if (f.part && f.pick && pointInPolygon(cx, cy, f.pts)) return f.part;
+    }
+    // 静止整臂代理会盖住手部投影：允许手部穿过「同侧上臂 / 前臂」代理被点选，
+    // 但不能穿过更近的头 / 躯干等无关部位，避免把遮挡关系整体绕过。
+    for (i = PART_FACE_CACHE.length - 1; i >= 0; i--) {
+      f = PART_FACE_CACHE[i];
+      if ((f.part === 'handL' || f.part === 'handR') && pointInPolygon(cx, cy, f.pts)) { handId = f.part; break; }
+    }
+    for (i = PART_FACE_CACHE.length - 1; i >= 0; i--) {
+      f = PART_FACE_CACHE[i];
+      if (!f.part || f.pick || !pointInPolygon(cx, cy, f.pts)) continue;
+      if (handId && (f.part === 'arm' + handId.slice(-1) || f.part === 'forearm' + handId.slice(-1))) continue;
+      return f.part;
     }
     return null;
   }
@@ -2685,11 +3219,30 @@
     ctx.beginPath(); ctx.arc(p[0] * k, p[1] * k, Math.max(1.4, 3 * k), 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
+  function drawPartOverlay(ctx, s) {
+    if (!S.selPart) return;
+    var k = s / BASE;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(115,249,154,.96)';
+    ctx.fillStyle = 'rgba(115,249,154,.09)';
+    ctx.lineWidth = Math.max(1.8, 2.6 * k);
+    ctx.setLineDash([8 * k, 5 * k]);
+    PART_FACE_CACHE.forEach(function (f) {
+      if (f.part !== S.selPart) return;
+      ctx.beginPath();
+      f.pts.forEach(function (p, i) {
+        if (i) ctx.lineTo(p[0] * k, p[1] * k); else ctx.moveTo(p[0] * k, p[1] * k);
+      });
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    });
+    ctx.restore();
+  }
   function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
   // 画布交互：优先拖动贴纸 → 拖手 / 脚 / 头（IK）→ 空白处拖动转身
   (function drag() {
     var mode = null, lx = 0, ly = 0, offX = 0, offY = 0;
+    var pendingPart = null, moved = false, downX = 0, downY = 0;
     function toCanvas(e) {
       var r = stage.getBoundingClientRect();
       return [(e.clientX - r.left) / r.width * BASE, (e.clientY - r.top) / r.height * BASE];
@@ -2709,6 +3262,7 @@
     function isProc() { return !!PROC_POSES[S.pose]; }
     stage.addEventListener('pointerdown', function (e) {
       var p = toCanvas(e);
+      pendingPart = null; moved = false; downX = e.clientX; downY = e.clientY;
       var hit = hitSticker(p[0], p[1]);
       if (hit) {
         e.preventDefault();
@@ -2721,6 +3275,7 @@
       }
       if (S.selSticker) selectSticker(null);
       if (!isProc()) { repaint(); return; }
+      pendingPart = hitPart(p[0], p[1]);
       var limb = hitLimb(p[0], p[1]);
       if (limb) {
         e.preventDefault();
@@ -2737,6 +3292,7 @@
       stage.setPointerCapture(e.pointerId);
     });
     stage.addEventListener('pointermove', function (e) {
+      if (mode && Math.hypot(e.clientX - downX, e.clientY - downY) > 5) moved = true;
       if (mode === 'sticker') {
         var it = selStickerItem();
         if (!it) return;
@@ -2774,13 +3330,19 @@
       var q = toCanvas(e);
       var lim = isProc() ? hitLimb(q[0], q[1]) : null;
       if ((lim ? lim.id : null) !== (ikHover && ikHover.id)) { ikHover = lim; repaint(); }   // 悬停目标变化才重绘
-      stage.style.cursor = hitSticker(q[0], q[1]) ? 'move' : (lim ? 'grab' : '');
+      var partHover = !lim && isProc() ? hitPart(q[0], q[1]) : null;
+      stage.style.cursor = hitSticker(q[0], q[1]) ? 'move' : (lim ? 'grab' : (partHover ? 'pointer' : ''));
     });
     ['pointerup', 'pointercancel'].forEach(function (t) {
-      stage.addEventListener(t, function () {
-        if (mode === 'sticker') saveStickersSoon();
-        if (mode === 'limb') { ikDrag = null; ikHover = null; syncRigUI(); repaint(); }
-        mode = null;
+      stage.addEventListener(t, function (e) {
+        var finishedMode = mode;
+        if (finishedMode === 'sticker') saveStickersSoon();
+        if (finishedMode === 'limb') { ikDrag = null; ikHover = null; syncRigUI(); repaint(); }
+        // 单击与拖动分流：未越过 5px 阈值才选择部位，不改变原 IK / 转身手感。
+        if (e.type === 'pointerup' && !moved && (finishedMode === 'limb' || finishedMode === 'body')) {
+          if (pendingPart) selectPart(pendingPart, true); else selectPart(null);
+        }
+        pendingPart = null; mode = null;
       });
     });
     stage.addEventListener('pointerleave', function () {
@@ -2800,13 +3362,16 @@
   })();
 
   /* ---------------- 交互绑定 ---------------- */
+  function activateTab(id) {
+    var t = document.querySelector('.tab[data-tab="' + id + '"]');
+    if (!t) return;
+    [].forEach.call(document.querySelectorAll('.tab'), function (x) { x.classList.remove('active'); });
+    t.classList.add('active');
+    [].forEach.call(document.querySelectorAll('.tab-body'), function (b) { b.classList.add('hidden'); });
+    document.getElementById('tab-' + id).classList.remove('hidden');
+  }
   [].forEach.call(document.querySelectorAll('.tab'), function (t) {
-    t.onclick = function () {
-      [].forEach.call(document.querySelectorAll('.tab'), function (x) { x.classList.remove('active'); });
-      t.classList.add('active');
-      [].forEach.call(document.querySelectorAll('.tab-body'), function (b) { b.classList.add('hidden'); });
-      document.getElementById('tab-' + t.dataset.tab).classList.remove('hidden');
-    };
+    t.onclick = function () { activateTab(t.dataset.tab); };
   });
   document.getElementById('textInput').addEventListener('input', function (e) {
     S.text.content = e.target.value.trim(); repaint();
@@ -2831,6 +3396,8 @@
   document.getElementById('btnReset').onclick = function () {
     S.pose = 'pstand'; S.face = 'normal'; S.bg = 'none';
     S.rig = rigClone(REST_RIG); syncRigUI();
+    S.parts = createPartStates(); S.selPart = null; syncPartUI();
+    S.body = bodyClone(); bodyChanged();   // v1.8.0：体型一并还原官方标准
     S.text = { content: '', pos: 'bottom', style: 'meme', color: '#ffffff', size: 1 };
     S.stickerItems = [];
     S.selSticker = null;
@@ -2992,7 +3559,7 @@
     var i = 0;
     // 贴纸实例含 Image 对象，快照前先序列化成可 JSON 的纯数据
     var keep = JSON.stringify({
-      pose: S.pose, face: S.face, bg: S.bg, rig: S.rig, text: S.text,
+      pose: S.pose, face: S.face, bg: S.bg, rig: S.rig, parts: S.parts, text: S.text,
       bgFit: S.bgFit, bgOffX: S.bgOffX, bgOffY: S.bgOffY,
       stickerItems: serializableStickers()
     });
@@ -3067,7 +3634,9 @@
     setActive(document.getElementById('textColor'), S.text.color);
     setPose(S.pose); setFace(S.face); setBg(S.bg);
     S.rig = st.rig ? rigClone(st.rig) : rigClone(REST_RIG); // setPose 会载入预设姿势，这里恢复用户自定义骨骼
-    syncRigUI();
+    S.parts = st.parts ? createPartStates(st.parts) : createPartStates();
+    S.selPart = null;
+    syncRigUI(); syncPartUI();
     rebuildStickerList();
     syncStickerCtl();
     repaint();
@@ -3094,15 +3663,19 @@
 
   /* ---------------- 启动 ---------------- */
   // 调试/高级用法句柄
-  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, skin: { presets: SKIN_PRESETS, official: SKIN_OFFICIAL, setBase: applySkinBase, mix: skinMix, state: function () { return S.skin; } }, ik: { defs: IK_DEFS, pos: ikPos, solve: ikSolve, hit: hitLimb, state: function () { return { drag: ikDrag, hover: ikHover && ikHover.id }; } }, dbg3d: { buildSkeleton: buildSkeleton, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
+  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, parts: { defs: PART_DEFS, select: selectPart, hit: hitPart, reset: function () { S.parts = createPartStates(); syncPartUI(); repaint(); } }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, skin: { presets: SKIN_PRESETS, official: SKIN_OFFICIAL, setBase: applySkinBase, mix: skinMix, state: function () { return S.skin; } }, body: { rest: BODY_REST, defs: BODY_SLIDER_DEFS, presets: BODY_PRESETS, saved: function () { return bodySaved.slice(); }, state: function () { return bodyClone(S.body); }, set: function (f, label) { S.body = bodySanitize(bodyClone(f)); bodyChanged(label); }, apply: applyBody }, ik: { defs: IK_DEFS, pos: ikPos, solve: ikSolve, hit: hitLimb, state: function () { return { drag: ikDrag, hover: ikHover && ikHover.id }; } }, dbg3d: { buildSkeleton: buildSkeleton, updateSkeletonMatrices: updateSkeletonMatrices, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mS: mS, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
   function init() {
     feBind();
     seBind();
     buildRigUI();
     syncRigUI();
+    buildPartUI();
+    loadBody();        // v1.8.0：恢复本机保存的体型比例（需早于缩略图构建）
+    loadBodySaved();
     loadSkin();          // v1.5.0：恢复本机保存的外壳配色（需早于缩略图构建）
     buildOptions();
     buildSkinUI();
+    buildBodyUI();     // v1.8.0：体型面板（滑杆 / 预设 / 保存 / 导入导出）
     stBind();
     loadStickers();
     rebuildStickerList();

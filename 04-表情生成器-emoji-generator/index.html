@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>TRAE宝表情工厂 · 下一套官方表情包，由你来画</title>
-<meta name="description" content="基于 TRAE宝 官方形象的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
+<title>TRAE宝表情工厂 · TRAE宝表情包，由你来画</title>
+<meta name="description" content="基于 TRAE宝 角色三特征的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23d7fcae'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/style.css?v=20">
+<link rel="stylesheet" href="css/style.css?v=26">
 </head>
 <body>
 <header class="site-header">
@@ -14,7 +14,7 @@
     <canvas id="logoCanvas" width="52" height="52" aria-hidden="true"></canvas>
     <div class="brand-text">
       <h1>TRAE宝表情工厂</h1>
-      <p>下一套官方表情包，由你来画 ｜ TRAE宝 Emoji Studio</p>
+      <p>TRAE宝表情包，由你来画 ｜ TRAE宝 Emoji Studio</p>
     </div>
   </div>
   <nav class="header-actions">
@@ -43,7 +43,6 @@
       <button id="btnBatch" class="btn ghost" type="button">📦 导出套系（8 张）</button>
       <button id="btnGif" class="btn ghost" type="button">🎬 导出 GIF</button>
     </div>
-    <p class="preview-hint">小贴士：投稿建议「透明背景 + PNG + 1:1」，单张文案简短易读。</p>
   </section>
 
   <!-- 右：控制区 -->
@@ -52,6 +51,8 @@
       <button class="tab active" data-tab="pose" role="tab" type="button">姿势</button>
       <button class="tab" data-tab="face" role="tab" type="button">表情</button>
       <button class="tab" data-tab="rig" role="tab" type="button">骨骼</button>
+      <button class="tab" data-tab="part" role="tab" type="button">部位</button>
+      <button class="tab" data-tab="body" role="tab" type="button">体型</button>
       <button class="tab" data-tab="skin" role="tab" type="button">配色</button>
       <button class="tab" data-tab="bg" role="tab" type="button">背景</button>
       <button class="tab" data-tab="text" role="tab" type="button">文字</button>
@@ -60,7 +61,7 @@
     </div>
 
     <div class="tab-body" id="tab-pose">
-      <h3 class="group-title">姿势 <small>全部手绘 3D 模型，官方 PNG 仅作参考</small></h3>
+      <h3 class="group-title">姿势 <small>全部手绘 3D 模型，底部为自绘参考图</small></h3>
       <div class="option-grid" id="poseProc"></div>
     </div>
 
@@ -75,6 +76,47 @@
         滑杆数值自动同步回填——滑杆与拖拽可任意混用。</p>
       <div class="rig-grid" id="rigSliders"></div>
       <button id="btnRigZero" class="btn ghost rig-zero" type="button">↺ 关节归零</button>
+    </div>
+
+    <div class="tab-body hidden" id="tab-part">
+      <h3 class="group-title">指定部位调整 <small>单击画布部位，或从下方直接选择</small></h3>
+      <p class="rig-tip">💡 <b>单击</b>选中部位并高亮；<b>拖动</b>仍是原来的肢体 IK / 身体转身。
+        尺寸为整体等比缩放，角度与位移沿部位局部 XYZ 轴；父级调整会带动子级。</p>
+      <div class="chips part-chips" id="partChips"></div>
+      <div class="part-select-head">
+        <span class="part-current" id="partSelName">未选择部位</span>
+        <button id="partDeselect" class="btn ghost sticker-mini" type="button" disabled>取消选择</button>
+      </div>
+      <div class="rig-grid" id="partSliders"></div>
+      <div class="part-actions">
+        <button id="partReset" class="btn ghost" type="button" disabled>↺ 复位当前部位</button>
+        <button id="partAllReset" class="btn ghost" type="button">↺ 全部位复位</button>
+      </div>
+      <p class="fe-tip">部位高亮只显示在预览层，不会进入 PNG / GIF 导出；切换姿势保留部位调整，右上角「重置」恢复全部默认。</p>
+    </div>
+
+    <div class="tab-body hidden" id="tab-body">
+      <h3 class="group-title">体型预设 <small>官方标准体型为默认档，点击即切换</small></h3>
+      <div class="chips" id="bodyPresets"></div>
+
+      <h3 class="group-title">捏体型 <small>10 项比例参数，关节位置自动联动</small></h3>
+      <div class="rig-grid" id="bodySliders"></div>
+      <div class="part-actions">
+        <button id="bodyOfficial" class="btn ghost" type="button" disabled>↺ 还原官方标准体型</button>
+      </div>
+
+      <h3 class="group-title">我的体型 <small>命名保存当前体型，可导入导出分享</small></h3>
+      <div class="body-save-row">
+        <input id="bodyName" type="text" maxlength="12" placeholder="体型名称，如：我的Q版" autocomplete="off">
+        <button id="bodySaveBtn" class="btn" type="button">保存当前体型</button>
+      </div>
+      <div class="chips" id="bodySaved"></div>
+      <div class="part-actions">
+        <button id="bodyExport" class="btn ghost" type="button">⬇ 导出体型</button>
+        <button id="bodyImport" class="btn ghost" type="button">⬆ 导入体型</button>
+        <input id="bodyFile" type="file" accept="application/json,.json" hidden>
+      </div>
+      <p class="fe-tip">体型改变全身比例：头三围、屏幕占比、躯干长宽、四肢粗细与长度、脚掌长度；肩 / 髋 / 颈关节位置随体型联动，超高体型自动缩小取景保证全身入画。边框、玻璃与缺角为结构特征件不随体型缩放。体型保存在本机浏览器，PNG / GIF 导出与姿势缩略图都使用当前体型。</p>
     </div>
 
     <div class="tab-body hidden" id="tab-skin">
@@ -241,9 +283,9 @@
 </main>
 
 <footer class="site-footer">
-  <h3>形象参考 · 来自活动《TRAE宝表情包小赛》官方素材</h3>
+  <h3>形象参考 · 全部为本地自绘图稿（非官方素材）</h3>
   <div class="gallery" id="gallery"></div>
-  <p class="foot-note">角色三特征：方形头部 · 屏幕表情 · 黑色机身 ｜ 本页为本地原型，图片仅在浏览器内处理，不上传任何数据。</p>
+  <p class="foot-note">角色三特征：方形头部 · 屏幕表情 · 黑色机身 ｜ 点击每张图下的「保存」可下载该参考图；本页为本地原型，图片仅在浏览器内处理，不上传任何数据。</p>
 </footer>
 
 <div id="faceEditor" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="feTitle">
@@ -335,6 +377,6 @@
 
 <script src="js/assets.js?v=12"></script>
 <script src="js/gif-encoder.js?v=1"></script>
-<script src="js/app.js?v=23"></script>
+<script src="js/app.js?v=31"></script>
 </body>
 </html>

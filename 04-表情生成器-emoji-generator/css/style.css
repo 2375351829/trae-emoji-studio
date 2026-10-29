@@ -107,7 +107,6 @@ button { font-family: inherit; }
   border: 2px solid var(--ink); border-radius: 10px; padding: 9px 10px; font-size: 14px;
   box-shadow: 3px 3px 0 rgba(10, 11, 13, .14); cursor: pointer;
 }
-.preview-hint { color: var(--muted); font-size: 12px; margin: 10px 2px 0; }
 
 /* ---------- 控制面板 ---------- */
 .controls-panel {
@@ -227,6 +226,19 @@ input[type="range"] { width: 100%; accent-color: var(--accent-2); }
 .anim-switch { margin: 6px 0 12px; }
 .rig-zero { margin-top: 14px; }
 
+/* 指定部位调整（v1.7.0） */
+.part-chips { margin-bottom: 14px; }
+.part-chips .chip { padding: 6px 11px; font-size: 12px; }
+.part-chips .chip.active {
+  border-color: var(--ink); background: var(--accent-soft); color: var(--ink); font-weight: 700;
+  box-shadow: 2px 2px 0 rgba(10, 11, 13, .14);
+}
+.part-select-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.part-current { color: var(--ink); font-size: 13px; font-weight: 700; }
+.part-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.part-actions .btn { padding: 7px 11px; font-size: 12px; }
+#tab-part .fe-tip { margin-top: 12px; }
+
 /* 角色配色（v1.5.0） */
 .skin-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .skin-preset {
@@ -279,7 +291,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent-2); }
 .gallery { display: flex; gap: 10px; flex-wrap: wrap; }
 .gallery .g {
   width: clamp(84px, 10vw, 120px); border-radius: 10px; overflow: hidden;
-  border: 2px solid var(--ink); background: #fff;
+  border: 2px solid var(--ink); background: #fff; display: flex; flex-direction: column;
   transition: transform .12s ease, box-shadow .12s ease;
 }
 .gallery .g:hover { transform: translate(-1px, -2px); box-shadow: 3px 3px 0 rgba(10, 11, 13, .16); }
@@ -287,6 +299,12 @@ input[type="range"] { width: 100%; accent-color: var(--accent-2); }
 .gallery .g figcaption {
   font-size: 11px; color: var(--muted); text-align: center; padding: 4px; background: var(--panel-2);
 }
+.gallery .g-save {
+  width: 100%; border: 0; border-top: 1px solid var(--line-soft);
+  background: #ffffff; color: var(--muted); font-size: 11px; line-height: 1;
+  padding: 6px 4px; cursor: pointer; transition: background .12s, color .12s;
+}
+.gallery .g-save:hover { background: var(--accent-soft); color: var(--ink); }
 .foot-note { color: var(--muted); font-size: 12px; margin-top: 16px; }
 
 /* ---------- 自定义表情：图标上的编辑角标 / 「自己画」入口 ---------- */
@@ -446,6 +464,29 @@ input[type="range"] { width: 100%; accent-color: var(--accent-2); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* 全身体型（v1.8.0） */
+#tab-body .chips { margin-bottom: 14px; }
+#tab-body .chip { padding: 6px 12px; font-size: 12.5px; }
+#tab-body .chip.active {
+  border-color: var(--ink); background: var(--accent-soft); color: var(--ink); font-weight: 700;
+  box-shadow: 2px 2px 0 rgba(10, 11, 13, .14);
+}
+#tab-body .chip .chip-del {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin-left: 7px; border-radius: 50%;
+  font-size: 10px; font-style: normal; line-height: 1;
+  color: var(--muted); background: rgba(10, 11, 13, .06); transition: all .12s;
+}
+#tab-body .chip .chip-del:hover { color: #fff; background: var(--ink); }
+.body-save-row { display: flex; gap: 8px; margin: 0 0 10px; }
+.body-save-row input {
+  flex: 1; min-width: 0; border: 2px solid var(--line-soft); border-radius: 10px;
+  padding: 8px 12px; font-size: 13px; background: #fff; color: var(--text);
+}
+.body-save-row input:focus { outline: none; box-shadow: 0 0 0 3px rgba(115, 249, 154, .5); }
+.body-save-row .btn { flex-shrink: 0; }
+.body-saved-empty { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 920px) {
   .studio { grid-template-columns: 1fr; }
@@ -456,7 +497,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent-2); }
   }
   /* 吸顶预览限高为小窗，避免大尺寸预览把下方控制面板整块盖住 */
   .canvas-holder { width: min(100%, 44vh); margin: 0 auto; }
-  .preview-hint { display: none; }
   .preview-toolbar { margin-top: 6px; }
   .btn { padding: 8px 12px; font-size: 13px; }
   .brand-text p { display: none; }
