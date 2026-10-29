@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>TRAE宝表情工厂 · 下一套官方表情包，由你来画</title>
 <meta name="description" content="基于 TRAE宝 官方形象的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23141719'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%239ff7e4'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%239ff7e4'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23d7fcae'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css?v=20">
 </head>
 <body>
 <header class="site-header">
@@ -52,6 +52,7 @@
       <button class="tab active" data-tab="pose" role="tab" type="button">姿势</button>
       <button class="tab" data-tab="face" role="tab" type="button">表情</button>
       <button class="tab" data-tab="rig" role="tab" type="button">骨骼</button>
+      <button class="tab" data-tab="skin" role="tab" type="button">配色</button>
       <button class="tab" data-tab="bg" role="tab" type="button">背景</button>
       <button class="tab" data-tab="text" role="tab" type="button">文字</button>
       <button class="tab" data-tab="sticker" role="tab" type="button">贴纸</button>
@@ -74,6 +75,23 @@
         滑杆数值自动同步回填——滑杆与拖拽可任意混用。</p>
       <div class="rig-grid" id="rigSliders"></div>
       <button id="btnRigZero" class="btn ghost rig-zero" type="button">↺ 关节归零</button>
+    </div>
+
+    <div class="tab-body hidden" id="tab-skin">
+      <h3 class="group-title">配色预设 <small>保留方形头部 / 屏幕表情 / 深色屏幕三特征</small></h3>
+      <div class="skin-presets" id="skinPresets"></div>
+
+      <h3 class="group-title">全局色板 <small>一次替换整套外壳配色</small></h3>
+      <div class="skin-global">
+        <input id="skinGlobal" type="color" value="#373834" aria-label="全局外壳颜色">
+        <span id="skinGlobalHex" class="skin-hex">#373834</span>
+        <button id="skinOfficial" class="btn ghost skin-reset" type="button">↺ 还原官方配色</button>
+      </div>
+
+      <h3 class="group-title">按部位取色 <small>头部 / 躯干 / 手臂 / 腿部 / 屏幕边框</small></h3>
+      <div class="skin-parts" id="skinParts"></div>
+      <p class="fe-tip">换色只替换外壳材质：手 / 脚 / 缺口阴影会按官方明暗关系自动派生，光照拟合随基色换算，
+        正 / 侧 / 顶的亮度层次保持不变；屏幕玻璃与像素表情不参与换色。配色保存在本机浏览器，刷新仍在。</p>
     </div>
 
     <div class="tab-body hidden" id="tab-bg">
@@ -317,6 +335,6 @@
 
 <script src="js/assets.js?v=12"></script>
 <script src="js/gif-encoder.js?v=1"></script>
-<script src="js/app.js?v=19"></script>
+<script src="js/app.js?v=23"></script>
 </body>
 </html>
