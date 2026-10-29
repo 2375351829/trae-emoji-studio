@@ -257,6 +257,95 @@
       } }
   ];
 
+  /* ---------------- 表情二次创作（v1.9.0） ---------------- */
+  // 内置表情也能改：名称 / 眼睛亮度 / 发光色 / 像素。只存改动（覆盖记录），未改动的内置表情仍走官方原画。
+  var FACE_EDIT_KEY = 'traeEmoji.faceEdit.v1';
+  var FACE_EDITS = {};                          // { [内置表情 id]: { label, glow, bright, cells } }
+  var BRIGHT_MIN = 0.4, BRIGHT_MAX = 1.6;       // 眼睛亮度范围（1 = 官方亮度）
+
+  function clampBright(v) {
+    v = +v;
+    if (!isFinite(v)) v = 1;
+    return Math.max(BRIGHT_MIN, Math.min(BRIGHT_MAX, Math.round(v * 100) / 100));
+  }
+  function faceBright(def) { return (def && def.bright != null) ? clampBright(def.bright) : 1; }
+  // 亮度同时作用于像素与 LED 辉光：像素在缓存位图里乘系数，辉光色按同一系数换算
+  function brightenCanvas(cv, k) {
+    if (!k || Math.abs(k - 1) < 0.001) return cv;
+    var c = cv.getContext('2d');
+    var img = c.getImageData(0, 0, cv.width, cv.height), d = img.data;
+    for (var i = 0; i < d.length; i += 4) {
+      if (!d[i + 3]) continue;
+      d[i] = Math.min(255, Math.round(d[i] * k));
+      d[i + 1] = Math.min(255, Math.round(d[i + 1] * k));
+      d[i + 2] = Math.min(255, Math.round(d[i + 2] * k));
+    }
+    c.putImageData(img, 0, 0);
+    return cv;
+  }
+  function brightHex(hex, k) {
+    var m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m || Math.abs(k - 1) < 0.001) return hex;
+    var n = parseInt(m[1], 16);
+    var r = Math.min(255, Math.round(((n >> 16) & 255) * k));
+    var g = Math.min(255, Math.round(((n >> 8) & 255) * k));
+    var b = Math.min(255, Math.round((n & 255) * k));
+    return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+  }
+  function faceGlow(def) { return brightHex(def.glow || C.cyan, faceBright(def)) || (def.glow || C.cyan); }
+  function builtinFace(id) {
+    for (var i = 0; i < BUILTIN_FACES.length; i++) if (BUILTIN_FACES[i].id === id) return BUILTIN_FACES[i];
+    return null;
+  }
+  function isBuiltinFace(id) { return !!builtinFace(id); }
+  function editedFaceDef(base, e) {
+    return {
+      id: base.id, label: e.label || base.label, glow: e.glow || base.glow,
+      bright: clampBright(e.bright), cells: e.cells, edited: true, baseId: base.id,
+      draw: function (p) { drawCells(p, e.cells); }
+    };
+  }
+  // 把表情当前像素栅格化成 40×28 数据（内置表情进入编辑器做二次创作的底稿）
+  function faceCellsOf(id) {
+    var cv = getFaceCanvas(id).cv;
+    var data = cv.getContext('2d').getImageData(0, 0, FW, FH).data;
+    var cells = gridBlank(FW, FH);
+    for (var i = 0; i < FW * FH; i++) {
+      if (data[i * 4 + 3] > 8) {
+        cells[i] = '#' + [0, 1, 2].map(function (k) {
+          return ('0' + data[i * 4 + k].toString(16)).slice(-2);
+        }).join('');
+      }
+    }
+    return cells;
+  }
+  function faceEditSanitize(id, e) {
+    var base = builtinFace(id);
+    if (!base || !e || typeof e !== 'object') return null;
+    if (!Array.isArray(e.cells) || e.cells.length !== FW * FH) return null;
+    return {
+      label: (typeof e.label === 'string' && e.label.trim() ? e.label.trim() : base.label).slice(0, 8),
+      glow: /^#[0-9a-f]{6}$/i.test(e.glow || '') ? e.glow : base.glow,
+      bright: clampBright(e.bright),
+      cells: e.cells.slice()
+    };
+  }
+  function loadFaceEdits() {
+    var raw = {};
+    try { raw = JSON.parse(localStorage.getItem(FACE_EDIT_KEY) || '{}') || {}; }
+    catch (e) { raw = {}; }
+    FACE_EDITS = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    Object.keys(raw).forEach(function (id) {
+      var rec = faceEditSanitize(id, raw[id]);
+      if (rec) FACE_EDITS[id] = rec;
+    });
+  }
+  function persistFaceEdits() {
+    try { localStorage.setItem(FACE_EDIT_KEY, JSON.stringify(FACE_EDITS)); return true; }
+    catch (e) { return false; }
+  }
+
   /* ---------------- 自定义表情（像素画板产出） ---------------- */
   // 存储结构：{ id, label, glow, cells: 40×28 的颜色数组（空串=透明） }
   var CUSTOM_KEY = 'traeEmoji.customFaces.v1';
@@ -272,7 +361,8 @@
   }
   function customDef(rec) {
     return {
-      id: rec.id, label: rec.label, glow: rec.glow, custom: true, cells: rec.cells,
+      id: rec.id, label: rec.label, glow: rec.glow, bright: clampBright(rec.bright),
+      custom: true, cells: rec.cells,
       draw: function (p) { drawCells(p, rec.cells); }
     };
   }
@@ -287,14 +377,18 @@
   }
   function rebuildFaces() {
     FACES.length = 0;
-    BUILTIN_FACES.forEach(function (d) { FACES.push(d); });
+    BUILTIN_FACES.forEach(function (d) {
+      var e = FACE_EDITS[d.id];
+      FACES.push(e ? editedFaceDef(d, e) : d);   // 二次创作过的内置表情走覆盖记录
+    });
     CUSTOM_FACES.forEach(function (r) { FACES.push(customDef(r)); });
-    fillAnimFace2();   // 表情列表变化（自定义增删）→ 同步「第二表情」下拉
+    fillAnimFace2();   // 表情列表变化（自定义增删 / 内置改名）→ 同步「第二表情」下拉
   }
   function persistCustomFaces() {
     try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(CUSTOM_FACES)); return true; }
     catch (e) { return false; }
   }
+  loadFaceEdits();     // 需早于 rebuildFaces，否则内置表情的二次创作不会生效
   loadCustomFaces();
 
   /* ---------------- 手绘模型：3D 骨骼引擎 ---------------- */
@@ -781,6 +875,7 @@
     ctx.fill();
 
     var sk = updateSkeletonMatrices(buildSkeleton(rig));
+    LAST_SK = sk;   // v1.10.0：缓存当帧骨骼，供挂载式贴纸取部位世界矩阵（动画逐帧更新）
 
     // 屏幕装配件（边框 + 玻璃）贴在头前脸上，排序必须排在「头正面」之后。
     // 头正面是个大四边形，转角后它离相机最近的那个角 z 会远大于屏幕件自身四角的 z，
@@ -1057,7 +1152,9 @@
 
   /* ---------------- 循环动画（v1.4.0） ---------------- */
   var ANIM_KEY = 'traeEmoji.anim.v1';
-  var ANIM_REST = { playing: true, breath: 6, sway: 3, walk: 10, switchOn: false, face2: 'wink', period: 1.6 };
+  var ANIM_OFF_KEY = 'traeEmoji.animAutoOff.v1';   // v1.9.0：一次性迁移标记（旧存档不再自动播放）
+  // v1.9.0：默认不自动播放，进页面先看到静态姿势；点「▶ 播放预览」才开始
+  var ANIM_REST = { playing: false, breath: 6, sway: 3, walk: 10, switchOn: false, face2: 'wink', period: 1.6 };
   function animClone(a) {
     var o = {}, k;   // 以默认值为底，避免旧存档缺字段
     for (k in ANIM_REST) o[k] = (a && a[k] !== undefined) ? a[k] : ANIM_REST[k];
@@ -1089,14 +1186,223 @@
     return t >= 0.9 ? S.anim.face2 : S.face;
   }
   function loadAnim() {
+    var needOff = true;   // 旧存档（v1.8.0 及以前）默认 playing:true，需一次性强制暂停
     try {
       var raw = localStorage.getItem(ANIM_KEY);
       if (raw) S.anim = animClone(JSON.parse(raw));
-    } catch (e) { /* 存储不可用则用默认值 */ }
+      needOff = !localStorage.getItem(ANIM_OFF_KEY);
+    } catch (e) { /* 存储不可用：默认值本身就是暂停 */ }
+    if (needOff) {
+      S.anim.playing = false;
+      try { localStorage.setItem(ANIM_OFF_KEY, '1'); } catch (e) { }
+      saveAnim();
+    }
   }
   function saveAnim() {
     try { localStorage.setItem(ANIM_KEY, JSON.stringify(S.anim)); } catch (e) { }
   }
+
+  /* ---------------- 关键帧动画（v1.11.0） ---------------- */
+  // 时间轴 = 一组按时刻排序的关键帧，每帧是骨骼角度的全量快照；
+  // 相邻帧之间 smoothstep 插值，循环时长 = 末帧时刻 - 首帧时刻。
+  // 播放 / 播放头停留均不写入 S.rig（所见即所得，退出查看即回到当前骨骼）。
+  var KF_KEY = 'traeEmoji.kf.v1';
+  var KF_SAVED_KEY = 'traeEmoji.kfSaved.v1';   // 「我的动作」库
+  var KF_SAVED_MAX = 12;
+  var KF = { frames: [], playing: false, viewT: null };   // viewT=null 表示不在时间轴查看模式
+
+  function kfClone(f) { return { t: +f.t, rig: rigClone(f.rig) }; }
+  function kfSanitize(fs) {   // 导入 / 读取时收敛：0~30s、必须有 rig、按时刻排序
+    var out = [];
+    (fs || []).forEach(function (f) {
+      if (!f || typeof f.t !== 'number' || f.t < 0 || f.t > 30 || !f.rig) return;
+      out.push(kfClone(f));
+    });
+    out.sort(function (a, b) { return a.t - b.t; });
+    return out;
+  }
+  function kfSave() { try { localStorage.setItem(KF_KEY, JSON.stringify(KF.frames)); } catch (e) { } }
+  function kfLoad() {
+    try {
+      var raw = localStorage.getItem(KF_KEY);
+      if (raw) KF.frames = kfSanitize(JSON.parse(raw));
+    } catch (e) { KF.frames = []; }
+  }
+  function kfActive() { return KF.frames.length >= 2; }             // 可播放：至少 2 帧
+  function kfDur() {
+    return KF.frames.length >= 2 ? Math.max(0.1, KF.frames[KF.frames.length - 1].t - KF.frames[0].t) : 0;
+  }
+  function kfEase(u) { return u * u * (3 - 2 * u); }                // smoothstep：帧间平滑加减速
+
+  // tt 秒 → 插值骨骼（首帧前保持首帧，末帧后保持末帧）
+  function kfRigAt(tt) {
+    var fs = KF.frames;
+    if (!fs.length) return rigClone(S.rig || REST_RIG);
+    if (tt <= fs[0].t) return rigClone(fs[0].rig);
+    var last = fs[fs.length - 1];
+    if (tt >= last.t) return rigClone(last.rig);
+    for (var i = 0; i < fs.length - 1; i++) {
+      var a = fs[i], b = fs[i + 1];
+      if (tt >= a.t && tt <= b.t) {
+        var u = (b.t - a.t) < 1e-6 ? 1 : (tt - a.t) / (b.t - a.t);
+        var e = kfEase(u), rig = rigClone(a.rig);
+        for (var k in rig) rig[k] = a.rig[k] + (b.rig[k] - a.rig[k]) * e;
+        return rig;
+      }
+    }
+    return rigClone(last.rig);
+  }
+
+  // 按时间轴时刻渲染整幅画面（预览与 GIF / APNG 导出共用；ui=true 只用于预览层）
+  function renderKfView(ctx, s, ui, tt) {
+    ctx.clearRect(0, 0, s, s);
+    renderBg(ctx, S.bg, s);
+    renderProcedural(ctx, s, undefined, kfRigAt(tt));
+    renderStickers(ctx, s, ui);
+    renderText(ctx, s);
+    if (ui) {
+      drawPartOverlay(ctx, s);
+      drawIkOverlay(ctx, s);
+    }
+  }
+
+  // 退出时间轴查看（播放 / 播放头停留），预览回到当前骨骼静态——骨骼编辑入口统一调用
+  function kfExitView() {
+    var was = KF.playing || KF.viewT != null;
+    KF.playing = false; KF.viewT = null;
+    stopKfLoop();
+    if (was) { syncKfUI(); repaint(); }
+  }
+  // 播放关键帧时暂停循环动画；反之亦然（两套动画互斥，避免叠加失控）
+  function kfPauseLoopAnim() {
+    if (S.anim.playing) { S.anim.playing = false; saveAnim(); syncAnimUI(); }
+  }
+
+  /* ---- 动作预设：每帧只写增量字段，载入时补全站立基准 ---- */
+  var KF_PRESETS = [
+    { id: 'wave', label: '招手', frames: [
+      { t: 0, rig: { lArmSide: 118, lArmFront: 16, headYaw: -6 } },
+      { t: 0.4, rig: { lArmSide: 118, lArmFront: -20, headYaw: -6 } },
+      { t: 0.8, rig: { lArmSide: 118, lArmFront: 46, headYaw: -6 } },
+      { t: 1.2, rig: { lArmSide: 118, lArmFront: -20, headYaw: -6 } },
+      { t: 1.6, rig: { lArmSide: 118, lArmFront: 16, headYaw: -6 } }
+    ] },
+    { id: 'nod', label: '点头', frames: [
+      { t: 0, rig: { } },
+      { t: 0.35, rig: { headPitch: -13 } },
+      { t: 0.7, rig: { } },
+      { t: 1.0, rig: { headPitch: -10 } },
+      { t: 1.3, rig: { } }
+    ] },
+    { id: 'shake', label: '摇头', frames: [
+      { t: 0, rig: { } },
+      { t: 0.4, rig: { headYaw: -17 } },
+      { t: 0.8, rig: { headYaw: 17 } },
+      { t: 1.2, rig: { headYaw: -12 } },
+      { t: 1.5, rig: { } }
+    ] },
+    { id: 'hop', label: '开心跳', frames: [
+      { t: 0, rig: { lArmSide: 34, rArmSide: 34 } },
+      { t: 0.35, rig: { lArmSide: 62, rArmSide: 62, lArmFront: -14, rArmFront: -14, bounce: -34 } },
+      { t: 0.7, rig: { lArmSide: 34, rArmSide: 34 } },
+      { t: 1.05, rig: { lArmSide: 62, rArmSide: 62, lArmFront: -14, rArmFront: -14, bounce: -34 } },
+      { t: 1.4, rig: { lArmSide: 34, rArmSide: 34 } }
+    ] },
+    { id: 'glance', label: '左右看', frames: [
+      { t: 0, rig: { } },
+      { t: 0.5, rig: { headYaw: -19, bodyYaw: -6 } },
+      { t: 1.0, rig: { } },
+      { t: 1.5, rig: { headYaw: 19, bodyYaw: 6 } },
+      { t: 2.0, rig: { } }
+    ] },
+    { id: 'dance', label: '扭腰摇摆', frames: [
+      { t: 0, rig: { lArmSide: 30, rArmSide: 30 } },
+      { t: 0.6, rig: { lArmSide: 30, rArmSide: 30, bodyYaw: 9, bodyRoll: -4, lArmFront: 22, rArmFront: -22, bounce: -6 } },
+      { t: 1.2, rig: { lArmSide: 30, rArmSide: 30 } },
+      { t: 1.8, rig: { lArmSide: 30, rArmSide: 30, bodyYaw: -9, bodyRoll: 4, lArmFront: -22, rArmFront: 22, bounce: -6 } },
+      { t: 2.4, rig: { lArmSide: 30, rArmSide: 30 } }
+    ] },
+    { id: 'cheer', label: '举手欢呼', frames: [
+      { t: 0, rig: { lArmSide: 116, rArmSide: 116, lArmFront: 8, rArmFront: 8 } },
+      { t: 0.5, rig: { lArmSide: 130, rArmSide: 130, lArmFront: -10, rArmFront: -10, bounce: -20 } },
+      { t: 1.0, rig: { lArmSide: 116, rArmSide: 116, lArmFront: 8, rArmFront: 8 } },
+      { t: 1.5, rig: { lArmSide: 130, rArmSide: 130, lArmFront: -10, rArmFront: -10, bounce: -20 } },
+      { t: 2.0, rig: { lArmSide: 116, rArmSide: 116, lArmFront: 8, rArmFront: 8 } }
+    ] }
+  ];
+  /* ---- 时间轴编辑操作 ---- */
+  function kfSortSave() {
+    KF.frames.sort(function (a, b) { return a.t - b.t; });
+    kfSave();
+  }
+  // 在播放头时刻（无查看态则接在末尾）用当前骨骼打一帧；同位置（<0.05s）覆盖旧帧
+  function kfAddFrame() {
+    var t = KF.viewT != null ? KF.viewT
+      : (KF.frames.length ? Math.round((KF.frames[KF.frames.length - 1].t + 0.4) * 100) / 100 : 0);
+    var near = -1;
+    for (var i = 0; i < KF.frames.length; i++) if (Math.abs(KF.frames[i].t - t) < 0.05) { near = i; break; }
+    var f = { t: Math.round(t * 100) / 100, rig: rigClone(S.rig || REST_RIG) };
+    if (near >= 0) KF.frames[near] = f; else KF.frames.push(f);
+    kfSortSave(); syncKfUI();
+    toast(near >= 0 ? '已覆盖 ' + f.t.toFixed(2) + 's 处的关键帧' : '已打关键帧 @ ' + f.t.toFixed(2) + 's');
+  }
+  // 载入动作（预设 / 库 / 导入）：全新时间轴；预设姿态是绝对的，统一切回站立姿势
+  function kfLoadFrames(fs, label) {
+    KF.frames = kfSanitize(fs);
+    setPose('pstand');
+    KF.playing = false; KF.viewT = KF.frames.length ? KF.frames[0].t : null;
+    kfSave(); syncKfUI(); repaint();
+    toast('已载入「' + label + '」' + (kfActive() ? '，点 ▶ 播放预览' : ''));
+  }
+  // 多段串联：把动作关键帧整体平移接在时间轴末尾（留 0.4s 过渡缓冲，衔接处姿势平滑收拢），追加后直接播放预览
+  function kfAppendFrames(fs, label) {
+    if (!fs || !fs.length) return;
+    var base = KF.frames.length ? Math.round((KF.frames[KF.frames.length - 1].t + 0.4) * 100) / 100 : 0;
+    var shifted = fs.map(function (f) {
+      return { t: Math.round((f.t + base) * 100) / 100, rig: rigClone(f.rig) };
+    });
+    if (!KF.frames.length) KF.frames = shifted;
+    else KF.frames = KF.frames.concat(shifted);
+    KF.viewT = null;
+    kfSortSave();
+    KF.playing = kfActive();   // 串联即预览
+    syncKfUI(); repaint();
+    toast('已串联「' + label + '」，共 ' + KF.frames.length + ' 帧 · ' + kfDur().toFixed(1) + 's');
+  }
+
+  /* ---- 我的动作库（命名保存 / 载入 / 删除，随本机持久化） ---- */
+  var kfSaved = [];
+  function loadKfSaved() {
+    kfSaved = [];
+    try {
+      var raw = localStorage.getItem(KF_SAVED_KEY);
+      if (raw) JSON.parse(raw).forEach(function (rec) {
+        if (rec && rec.name && rec.frames && rec.frames.length) {
+          kfSaved.push({ name: String(rec.name).trim().slice(0, 12), frames: kfSanitize(rec.frames) });
+        }
+      });
+    } catch (e) { }
+  }
+  function persistKfSaved() {
+    try { localStorage.setItem(KF_SAVED_KEY, JSON.stringify(kfSaved.slice(0, KF_SAVED_MAX))); } catch (e) { }
+  }
+  function saveKfNamed(name, frames) {
+    name = name.trim().slice(0, 12);
+    if (!name) { toast('请先给动作起个名字'); return; }
+    if (!frames.length) { toast('时间轴上还没有关键帧'); return; }
+    for (var i = 0; i < kfSaved.length; i++) {
+      if (kfSaved[i].name === name) {
+        kfSaved[i].frames = kfSanitize(frames);
+        persistKfSaved(); rebuildKfSavedUI(); rebuildKfAppendSel();
+        toast('已更新动作「' + name + '」'); return;
+      }
+    }
+    kfSaved.unshift({ name: name, frames: kfSanitize(frames) });
+    if (kfSaved.length > KF_SAVED_MAX) kfSaved.length = KF_SAVED_MAX;
+    persistKfSaved(); rebuildKfSavedUI(); rebuildKfAppendSel();
+    toast('已保存动作「' + name + '」');
+  }
+
 
   /* ---------------- 资源加载 ---------------- */
   var faceCache = {};     // 表情位图缓存
@@ -1108,6 +1414,8 @@
     cv.width = FW; cv.height = FH;
     var f = cv.getContext('2d');
     def.draw(makePen(f));
+    var k = faceBright(def);
+    if (k !== 1) brightenCanvas(cv, k);   // v1.9.0：眼睛亮度烘焙进缓存位图
     faceCache[faceId] = { cv: cv, def: def };
     return faceCache[faceId];
   }
@@ -1201,8 +1509,8 @@
     if (opts.persp) {
       // 3D 投影四边形：辉光两次三角映射（双对角线消除接缝），像素一次精确映射
       if (glowScale > 0) {
-        mapTex(ctx, face.cv, quad, face.def.glow, 26 * glowScale, false);
-        mapTex(ctx, face.cv, quad, face.def.glow, 26 * glowScale, true);
+        mapTex(ctx, face.cv, quad, faceGlow(face.def), 26 * glowScale, false);
+        mapTex(ctx, face.cv, quad, faceGlow(face.def), 26 * glowScale, true);
       }
       ctx.imageSmoothingEnabled = false;
       mapTex(ctx, face.cv, quad, null, 0, false);
@@ -1213,7 +1521,7 @@
     ctx.transform(ux, uy, vx, vy, 0, 0);
     ctx.imageSmoothingEnabled = false;
     if (glowScale > 0) {
-      ctx.shadowColor = face.def.glow;
+      ctx.shadowColor = faceGlow(face.def);
       ctx.shadowBlur = 26 * glowScale;
       ctx.drawImage(face.cv, 0, 0);
       ctx.shadowBlur = 10 * glowScale;
@@ -1498,6 +1806,56 @@
   }
 
   /* ---------------- 贴纸（实例渲染：位置 / 缩放 / 旋转 / 层级） ---------------- */
+  // v1.10.0：最近一次 renderProcedural 的骨骼缓存。挂载式贴纸从这里取部位世界矩阵，
+  // 动画 / 拖手柄逐帧渲染时自动跟随更新；缩略图只画角色，不会读到过期骨骼。
+  var LAST_SK = null;
+
+  // 各部位的贴纸默认锚点（部位节点局部坐标，随 GEO3D 体型联动）：
+  // 头顶上方给「帽子位」，躯干取前面板给「徽章位」，肢体取中段 / 末端中心。
+  function stickerAnchor(part) {
+    var g = GEO3D;
+    switch (part) {
+      case 'head': return [0, -g.headH / 2 - 14, 0];
+      case 'neck': return [0, 0, 0];
+      case 'torso': return [0, g.torsoOy, g.torsoD / 2];
+      case 'armL': case 'armR': return [0, g.armLen / 2, 0];
+      case 'forearmL': case 'forearmR': return [0, g.armLen / 4 - 2, 0];
+      case 'handL': case 'handR': return [0, 2, 0];
+      case 'legL': case 'legR': return [0, g.legLen / 2, 0];
+      case 'footL': case 'footR': return [0, 4, 10];
+    }
+    return [0, 0, 0];
+  }
+
+  // 挂载式贴纸的部位锚点投影（1024 基准坐标，不含用户偏移 dx/dy）。
+  // 骨骼不可用（尚未渲染）时返回 null，调用方回退自由式坐标。
+  function stickerMountBase(it) {
+    if (!it.mount || !LAST_SK) return null;
+    var node = LAST_SK.nodes[it.mount.part];
+    if (!node) return null;
+    return projectV(applyM(node._m, stickerAnchor(it.mount.part)));
+  }
+
+  // 贴纸统一变换：返回 [cx, cy, rotDeg, scaleMul]（1024 基准）。
+  // 自由式 = 画布坐标 + 自身旋转；挂载式 = 部位锚点投影 + 偏移，
+  // 并跟随肢体方向产生附加旋转、跟随部位缩放产生倍率（走路 / 抬手 / 捏体型时贴纸跟着走）。
+  function stickerXform(it) {
+    var rot = it.rot || 0;
+    if (!it.mount) return [it.x / 100 * BASE, it.y / 100 * BASE, rot, 1];
+    var base = stickerMountBase(it);
+    if (!base) return [it.x / 100 * BASE, it.y / 100 * BASE, rot, 1];
+    var node = LAST_SK.nodes[it.mount.part];
+    // 跟随旋转：肢体局部 +Y（骨骼延伸方向，静止时指向世界下方）投影后的偏角，
+    // 相对「竖直向下」为 0°——手臂侧摆 / 抬起多少度，贴纸就随多少度，点头 / 摆腿同理。
+    var dir = rotOnly(node._m, [0, 1, 0]);
+    var w = applyM(node._m, stickerAnchor(it.mount.part));
+    var p2 = projectV([w[0] + dir[0] * 30, w[1] + dir[1] * 30, w[2] + dir[2] * 30]);
+    var follow = Math.atan2(p2[0] - base[0], p2[1] - base[1]) * 180 / Math.PI;
+    // 跟随缩放：部位矩阵 X 轴单位向量的长度 = 该部位的附加 scale（捏粗细 / 放大时贴纸同步）
+    var scaleMul = Math.hypot.apply(null, rotOnly(node._m, [1, 0, 0]));
+    return [base[0] + (it.mount.dx || 0), base[1] + (it.mount.dy || 0), rot + follow, scaleMul || 1];
+  }
+
   function stickerRadiusUnit(it) {
     var sc = it.scale || 1;
     if (it.t === 'img') return (ST_IMG_BASE / 2) * sc;
@@ -1534,10 +1892,11 @@
   }
 
   function drawStickerItem(ctx, it, s) {
+    var xf = stickerXform(it), k = s / BASE;
     ctx.save();
-    ctx.translate(it.x / 100 * s, it.y / 100 * s);
-    if (it.rot) ctx.rotate(it.rot * Math.PI / 180);
-    drawStickerCore(ctx, it, s / BASE);
+    ctx.translate(xf[0] * k, xf[1] * k);
+    if (xf[2]) ctx.rotate(xf[2] * Math.PI / 180);
+    drawStickerCore(ctx, it, k * xf[3]);
     ctx.restore();
   }
 
@@ -1562,11 +1921,12 @@
 
   function drawStickerSelection(ctx, it, s) {
     var k = s / BASE;
+    var xf = stickerXform(it);
     var box = stickerBoxUnit(it);
-    var hw = box[0] * k * 1.04, hh = box[1] * k * 1.04;
+    var hw = box[0] * k * xf[3] * 1.04, hh = box[1] * k * xf[3] * 1.04;
     ctx.save();
-    ctx.translate(it.x / 100 * s, it.y / 100 * s);
-    if (it.rot) ctx.rotate(it.rot * Math.PI / 180);
+    ctx.translate(xf[0] * k, xf[1] * k);
+    if (xf[2]) ctx.rotate(xf[2] * Math.PI / 180);
     ctx.strokeStyle = 'rgba(115,249,154,.95)';
     ctx.lineWidth = Math.max(1.5, 2.5 * k);
     ctx.setLineDash([7 * k, 5 * k]);
@@ -1666,7 +2026,7 @@
 
   var stage = document.getElementById('stage');
   var stageCtx = stage.getContext('2d');
-  /* ---------------- 预览动画循环（v1.4.0） ---------------- */
+  /* ---------------- 预览动画循环（v1.4.0） + 关键帧播放（v1.11.0） ---------------- */
   var animRAF = 0;
   function animPhase() {
     return (performance.now() / 1000 % S.anim.period) / S.anim.period;
@@ -1677,8 +2037,35 @@
     render(stageCtx, BASE, true, animPhase());
     animRAF = requestAnimationFrame(animLoop);
   }
+  var kfRAF = 0, kfT0 = 0, kfBase = 0;
+  function startKfLoop() {   // 关键帧循环播放：viewT 持续推进，播放头 UI 同步跟随
+    kfT0 = performance.now();
+    kfBase = KF.viewT != null ? KF.viewT : 0;
+    (function step(now) {
+      kfRAF = 0;
+      if (!KF.playing || !kfActive()) { KF.playing = false; syncKfUI(); return; }
+      var dur = kfDur();
+      KF.viewT = (kfBase + (now - kfT0) / 1000) % dur;
+      renderKfView(stageCtx, BASE, true, KF.viewT);
+      syncKfHead();
+      kfRAF = requestAnimationFrame(step);
+    })(performance.now());
+  }
+  function stopKfLoop() {
+    if (kfRAF) { cancelAnimationFrame(kfRAF); kfRAF = 0; }
+  }
   function repaint() {
     document.getElementById('bgChecker').classList.toggle('show', S.bg === 'none');
+    // 渲染优先级（互斥）：关键帧播放 > 播放头停留 > 循环动画 > 当前骨骼静态
+    if (KF.playing && kfActive()) {
+      if (!kfRAF) startKfLoop();
+      return;
+    }
+    stopKfLoop();
+    if (KF.viewT != null) {
+      renderKfView(stageCtx, BASE, true, KF.viewT);
+      return;
+    }
     if (animActive()) {
       if (!animRAF) animRAF = requestAnimationFrame(animLoop);   // 循环帧里自绘
     } else {
@@ -1707,7 +2094,7 @@
     var fc = getFaceCanvas(def.id).cv;
     c.imageSmoothingEnabled = false;
     c.save();
-    c.shadowColor = def.glow; c.shadowBlur = 10;
+    c.shadowColor = faceGlow(def); c.shadowBlur = 10;
     c.drawImage(fc, 14, 22, 92, 64);
     c.restore();
     c.drawImage(fc, 14, 22, 92, 64);
@@ -1942,15 +2329,16 @@
       var b = optTile(buildFaceThumb(def), def.label, S.face === def.id);
       b.dataset.v = def.id;
       b.onclick = function () { setFace(def.id); };
-      if (def.custom) {
-        b.classList.add('opt-custom');
-        var pen = document.createElement('span');
-        pen.className = 'opt-edit';
-        pen.textContent = '✎';
-        pen.title = '编辑 / 删除这个自定义表情';
-        pen.onclick = function (e) { e.stopPropagation(); openFaceEditor(def); };
-        b.appendChild(pen);
-      }
+      // v1.9.0：内置与自定义表情都能二次创作（改名 / 调眼睛亮度 / 改像素）
+      var builtin = isBuiltinFace(def.id);
+      b.classList.add(builtin ? 'opt-builtin-edit' : 'opt-custom');
+      if (builtin && FACE_EDITS[def.id]) b.classList.add('opt-edited');
+      var pen = document.createElement('span');
+      pen.className = 'opt-edit';
+      pen.textContent = '✎';
+      pen.title = builtin ? '二次创作这个内置表情（改名 / 调眼睛亮度 / 改像素）' : '编辑 / 删除这个自定义表情';
+      pen.onclick = function (e) { e.stopPropagation(); openFaceEditor(def); };
+      b.appendChild(pen);
       fg.appendChild(b);
     });
     var add = document.createElement('button');
@@ -2053,11 +2441,39 @@
     }
   }
 
-  /* ---------------- 像素表情画板 ---------------- */
-  var FE_COLORS = [
+  /* ---------------- 像素画板通用：20 色板 / 三种取色（v1.9.1） ---------------- */
+  // 表情画板与贴纸画板共用；除预设色板外，还可自定义取色 / 屏幕取色 / 画板吸管
+  var GRID_PALETTE = [
     ['#9ff7e4', '青'], ['#f2ffff', '白'], ['#ff5a4e', '红'], ['#ff9bd3', '粉'],
-    ['#ffd75e', '黄'], ['#6fcbff', '蓝'], ['#8ef58e', '绿'], ['#ffa14a', '橙']
+    ['#ffd75e', '黄'], ['#6fcbff', '蓝'], ['#8ef58e', '绿'], ['#ffa14a', '橙'],
+    ['#c9a2ff', '紫'], ['#1a1d20', '黑'], ['#57e6c4', '薄荷'], ['#38e8ff', '天蓝'],
+    ['#d7fcae', '青柠'], ['#ff4d8d', '玫红'], ['#b57a4a', '棕'], ['#9aa3a8', '灰'],
+    ['#ffe9a3', '奶油'], ['#a0f0ff', '冰蓝'], ['#ffcf4d', '琥珀'], ['#e0c3ff', '浅紫']
   ];
+  function gridPickCell(E, x, y) {     // 画板吸管：取已有像素颜色，取到后自动切回画笔
+    var col = E.cells[y * E.W + x];
+    if (!col) return null;
+    E.color = col;
+    if (E.tool === 'pick') E.tool = 'pen';
+    return col;
+  }
+  function screenPickColor(apply) {    // 屏幕取色：EyeDropper API（Chrome / Edge 等支持）
+    if (!window.EyeDropper) { toast('当前浏览器不支持屏幕取色，请用「🎨 自定义颜色」或「💧 吸管」'); return; }
+    var ed;
+    try { ed = new window.EyeDropper(); }
+    catch (e) { toast('屏幕取色启动失败，请用「🎨 自定义颜色」'); return; }
+    ed.open().then(function (res) {
+      if (res && res.sRGBHex) apply(res.sRGBHex.toLowerCase());
+    }).catch(function (err) {
+      if (err && err.name === 'AbortError') return;   // 用户主动取消，不打扰
+      toast('屏幕取色不可用（需 https 或 localhost），请用「🎨 自定义颜色」');
+    });
+  }
+  function isHexColor(v) { return /^#[0-9a-f]{6}$/i.test(v || ''); }
+  function gridSafeColor(v, fallback) { return isHexColor(v) ? v.toLowerCase() : fallback; }
+
+  /* ---------------- 像素表情画板 ---------------- */
+  var FE_COLORS = GRID_PALETTE;
   var FE_CELL = 14;
   var FE = { W: FW, H: FH, cells: [], color: FE_COLORS[0][0], tool: 'pen', size: 1, mirror: false, undo: [], editing: null, drawing: false, last: null };
   var feEl = {};
@@ -2070,26 +2486,37 @@
     feEl.preview = document.getElementById('fePreview');
     feEl.name = document.getElementById('feName');
     feEl.glow = document.getElementById('feGlow');
+    feEl.bright = document.getElementById('feBright');
+    feEl.brightVal = document.getElementById('feBrightVal');
     feEl.mirror = document.getElementById('feMirror');
     feEl.del = document.getElementById('feDelete');
     feEl.title = document.getElementById('feTitle');
     feEl.palette = document.getElementById('feColors');
     feEl.sizeWrap = document.getElementById('feSize');
+    feEl.custom = document.getElementById('feCustom');
+    feEl.colorInput = document.getElementById('feColor');
+    feEl.screen = document.getElementById('feScreen');
+    feEl.hex = document.getElementById('feHex');
+    feEl.hexVal = document.getElementById('feHexVal');
 
     FE_COLORS.forEach(function (pair) {
       var sw = document.createElement('button');
       sw.type = 'button'; sw.className = 'fe-sw'; sw.dataset.c = pair[0];
       sw.style.setProperty('--c', pair[0]); sw.title = pair[1];
-      sw.onclick = function () {
-        FE.color = pair[0];
-        if (FE.tool === 'eraser') FE.tool = 'pen';
-        feSyncTools();
-      };
+      sw.onclick = function () { feApplyColor(pair[0], true); };
       feEl.palette.appendChild(sw);
+      if (pair[0] === '#1a1d20') return;   // 黑色发光不可见，不进发光色下拉
       var op = document.createElement('option');
       op.value = pair[0]; op.textContent = pair[1];
       feEl.glow.appendChild(op);
     });
+    // 自定义取色：隐藏的 type=color 挂到「🎨 自定义颜色」按钮上
+    feEl.custom.onclick = function () {
+      feEl.colorInput.value = feCurrentHex();
+      feEl.colorInput.click();
+    };
+    feEl.colorInput.addEventListener('input', function () { feApplyColor(feEl.colorInput.value, true); });
+    feEl.screen.onclick = function () { screenPickColor(function (hex) { feApplyColor(hex, false); }); };
     [].forEach.call(document.querySelectorAll('#feTools .fe-tool'), function (b) {
       b.onclick = function () { FE.tool = b.dataset.tool; feSyncTools(); };
     });
@@ -2098,11 +2525,21 @@
     });
     feEl.mirror.onchange = function () { FE.mirror = feEl.mirror.checked; };
     feEl.glow.onchange = function () { fePreview(); };
+    feEl.bright.addEventListener('input', function () {   // v1.9.0：眼睛亮度实时预览
+      feEl.brightVal.textContent = Math.round(feBrightValue() * 100) + '%';
+      fePreview();
+    });
 
     feEl.canvas.addEventListener('pointerdown', function (e) {
       var p = feCellAt(e);
       if (!p) return;
       e.preventDefault();
+      if (FE.tool === 'pick') {                       // v1.9.1：画板吸管
+        var got = gridPickCell(FE, p[0], p[1]);
+        if (got) { feSyncTools(); toast('已拾取颜色 ' + got); }
+        else toast('这一格是透明的，换一格再吸');
+        return;
+      }
       feEl.canvas.setPointerCapture(e.pointerId);
       fePushUndo();
       if (FE.tool === 'fill') {
@@ -2164,11 +2601,25 @@
     [].forEach.call(feEl.palette.children, function (b) {
       b.classList.toggle('active', b.dataset.c === FE.color);
     });
+    if (feEl.hex) {
+      feEl.hex.style.setProperty('--c', feCurrentHex());
+      feEl.hexVal.textContent = feCurrentHex();
+    }
+  }
+  function feCurrentHex() { return isHexColor(FE.color) ? FE.color : FE_COLORS[0][0]; }
+  function feApplyColor(hex, quiet) {
+    FE.color = gridSafeColor(hex, FE_COLORS[0][0]);
+    if (FE.tool === 'eraser' || FE.tool === 'pick') FE.tool = 'pen';
+    if (feEl.colorInput) feEl.colorInput.value = FE.color;
+    feSyncTools();
+    if (!quiet) toast('已取到颜色 ' + FE.color);
   }
 
   function openFaceEditor(def) {
     FE.editing = def || null;
-    FE.cells = def ? def.cells.slice() : feBlank();
+    var builtin = !!(def && isBuiltinFace(def.id));
+    // 内置表情先栅格化成像素底稿；已二次创作过的直接读存档 cells（避免亮度被重复烘焙）
+    FE.cells = def ? (def.cells ? def.cells.slice() : faceCellsOf(def.id)) : feBlank();
     FE.undo = [];
     FE.tool = 'pen';
     FE.size = 1;
@@ -2178,9 +2629,15 @@
     if (!feEl.modal) feBind();
     feEl.name.value = def ? def.label : '';
     feEl.glow.value = def ? def.glow : FE_COLORS[0][0];
+    feEl.colorInput.value = FE.color;   // 自定义取色器与当前画笔色同步
+    var pct = Math.round(faceBright(def) * 100);
+    feEl.bright.value = Math.max(40, Math.min(160, pct));
+    feEl.brightVal.textContent = pct + '%';
     feEl.mirror.checked = false;
-    feEl.del.classList.toggle('hidden', !def);
-    feEl.title.textContent = def ? '编辑表情' : '画一个新表情';
+    var canRestore = builtin && !!FACE_EDITS[def.id];
+    feEl.del.classList.toggle('hidden', !def || (builtin && !canRestore));
+    feEl.del.textContent = builtin ? '↺ 还原官方表情' : '删除这个表情';
+    feEl.title.textContent = builtin ? '二次创作内置表情' : (def ? '编辑表情' : '画一个新表情');
     feEl.modal.classList.remove('hidden');
     feSyncTools();
     fePaintUpdate();
@@ -2198,23 +2655,7 @@
   function feLine(x0, y0, x1, y1) { gridLine(FE, x0, y0, x1, y1); }
   function feFlood(x, y, col) { gridFlood(FE, x, y, col); }
   function fePushUndo() { gridPushUndo(FE); }
-  function feLoadTemplate(id) {
-    var src = getFaceCanvas(id).cv;
-    var tmp = document.createElement('canvas');
-    tmp.width = FW; tmp.height = FH;
-    var tc = tmp.getContext('2d');
-    tc.drawImage(src, 0, 0);
-    var data = tc.getImageData(0, 0, FW, FH).data;
-    var cells = feBlank();
-    for (var i = 0; i < FW * FH; i++) {
-      if (data[i * 4 + 3] > 8) {
-        cells[i] = '#' + [0, 1, 2].map(function (k) {
-          return ('0' + data[i * 4 + k].toString(16)).slice(-2);
-        }).join('');
-      }
-    }
-    FE.cells = cells;
-  }
+  function feLoadTemplate(id) { FE.cells = faceCellsOf(id); }
 
   function fePaintUpdate() {
     feRenderGrid();
@@ -2230,48 +2671,75 @@
     var tmp = document.createElement('canvas');
     tmp.width = FW; tmp.height = FH;
     drawCells(makePen(tmp.getContext('2d')), FE.cells);
+    var k = feBrightValue();
+    brightenCanvas(tmp, k);   // 预览同步眼睛亮度
     var dw = w - 40, dh = dw * FH / FW;
     var dx = (w - dw) / 2, dy = (h - dh) / 2;
     c.imageSmoothingEnabled = false;
     c.save();
-    c.shadowColor = feEl.glow.value || FE_COLORS[0][0];
+    c.shadowColor = brightHex(feGlowInput(), k) || FE_COLORS[0][0];
     c.shadowBlur = 16;
     c.drawImage(tmp, dx, dy, dw, dh);
     c.restore();
     c.drawImage(tmp, dx, dy, dw, dh);
   }
   function feGlowInput() { return feEl.glow.value || FE_COLORS[0][0]; }
+  function feBrightValue() { return clampBright((+feEl.bright.value || 100) / 100); }
 
   function feSave() {
     var label = (feEl.name.value || '').trim().slice(0, 8) || '我的表情';
     var glow = feGlowInput();
+    var bright = feBrightValue();
     var ink = false;
     for (var i = 0; i < FE.cells.length; i++) if (FE.cells[i]) { ink = true; break; }
     if (!ink) { toast('画板是空的，先画两个眼睛吧'); return; }
-    var rec = null;
-    if (FE.editing) {
-      rec = CUSTOM_FACES.find(function (r) { return r.id === FE.editing.id; });
-      if (!rec) { toast('这个表情已经不在了'); closeFaceEditor(); return; }
-      rec.label = label; rec.glow = glow; rec.cells = FE.cells.slice();
-      delete faceCache[rec.id];
+    var target = FE.editing ? FE.editing.id : null;
+    var rec = null, ok = true, builtin = !!(target && isBuiltinFace(target));
+    if (builtin) {
+      // 内置表情：保存为覆盖记录（名称 / 发光色 / 眼睛亮度 / 像素），随时可「还原官方表情」
+      FACE_EDITS[target] = { label: label, glow: glow, bright: bright, cells: FE.cells.slice() };
+      ok = persistFaceEdits();
+      delete faceCache[target];
     } else {
-      if (CUSTOM_FACES.length >= CUSTOM_MAX) { toast('自定义表情最多 ' + CUSTOM_MAX + ' 个，先删掉一些'); return; }
-      rec = {
-        id: 'c' + Date.now().toString(36) + Math.floor(Math.random() * 900 + 100),
-        label: label, glow: glow, cells: FE.cells.slice()
-      };
-      CUSTOM_FACES.push(rec);
+      if (target) {
+        rec = CUSTOM_FACES.find(function (r) { return r.id === target; });
+        if (!rec) { toast('这个表情已经不在了'); closeFaceEditor(); return; }
+        rec.label = label; rec.glow = glow; rec.bright = bright; rec.cells = FE.cells.slice();
+        delete faceCache[rec.id];
+      } else {
+        if (CUSTOM_FACES.length >= CUSTOM_MAX) { toast('自定义表情最多 ' + CUSTOM_MAX + ' 个，先删掉一些'); return; }
+        rec = {
+          id: 'c' + Date.now().toString(36) + Math.floor(Math.random() * 900 + 100),
+          label: label, glow: glow, bright: bright, cells: FE.cells.slice()
+        };
+        CUSTOM_FACES.push(rec);
+      }
+      ok = persistCustomFaces();
     }
-    var ok = persistCustomFaces();
+    var id = target || rec.id;
     rebuildFaces();
     buildFaceGrid();
-    setFace(rec.id);
+    setFace(id);
     closeFaceEditor();
-    toast(ok ? '已保存「' + label + '」' : '已保存「' + label + '」（本地存储不可用，刷新会丢失）');
+    toast((builtin ? '已二次创作「' : '已保存「') + label + '」' + (ok ? '' : '（本地存储不可用，刷新会丢失）'));
   }
   function feDelete() {
     if (!FE.editing) return;
-    var rec = CUSTOM_FACES.find(function (r) { return r.id === FE.editing.id; });
+    var id = FE.editing.id;
+    if (isBuiltinFace(id)) {
+      // 内置表情：清掉覆盖记录即还原官方原画（名称 / 亮度 / 像素一并复位）
+      if (!FACE_EDITS[id]) { closeFaceEditor(); return; }
+      delete FACE_EDITS[id];
+      persistFaceEdits();
+      delete faceCache[id];
+      rebuildFaces();
+      buildFaceGrid();
+      setFace(id);
+      closeFaceEditor();
+      toast('已还原官方表情「' + builtinFace(id).label + '」');
+      return;
+    }
+    var rec = CUSTOM_FACES.find(function (r) { return r.id === id; });
     if (!rec) { closeFaceEditor(); return; }
     if (!window.confirm('删除自定义表情「' + rec.label + '」？此操作不可恢复。')) return;
     CUSTOM_FACES = CUSTOM_FACES.filter(function (r) { return r.id !== rec.id; });
@@ -2372,12 +2840,47 @@
     stickerChanged();
   }
 
+  /* ---------------- 贴纸：挂载到部位（v1.10.0） ---------------- */
+  function clampMountOff(v) { v = +v || 0; return Math.max(-260, Math.min(260, Math.round(v))); }
+
+  function mountPartId(part) {
+    for (var i = 0; i < PART_DEFS.length; i++) if (PART_DEFS[i].id === part) return part;
+    return null;
+  }
+
+  // 挂载 / 卸下 / 按部位替换：
+  // - part 为空 = 卸下：把当前挂载投影位置写回画布坐标，恢复自由摆放（不丢贴纸）
+  // - part 合法 = 挂载：同一部位同时只挂一张，新挂载会替换旧贴纸（旧贴纸直接移除）
+  function setStickerMount(it, part) {
+    if (!it) return;
+    part = part ? mountPartId(part) : null;
+    if (part) {
+      var def = partDef(part);
+      var replaced = null;
+      S.stickerItems.forEach(function (o) {
+        if (o !== it && o.mount && o.mount.part === part) replaced = o;
+      });
+      if (replaced) {
+        S.stickerItems = S.stickerItems.filter(function (x) { return x !== replaced; });
+        toast('已替换「' + (def ? def.label : part) + '」上原有的挂载贴纸');
+      }
+      it.mount = { part: part, dx: 0, dy: 0 };
+    } else if (it.mount) {
+      var xf = stickerXform(it);   // 卸下瞬间的屏幕位置 → 画布百分比，贴纸原地变自由式
+      it.x = clampPct(xf[0] / BASE * 100);
+      it.y = clampPct(xf[1] / BASE * 100);
+      delete it.mount;
+    }
+    stickerChanged();
+  }
+
   /* ---------------- 贴纸：持久化 ---------------- */
   function serializableStickers() {
     return S.stickerItems.map(function (it) {
       return {
         uid: it.uid, t: it.t, ref: it.ref || null, src: it.src || null, pixel: !!it.pixel,
-        name: it.name || '', x: it.x, y: it.y, scale: it.scale || 1, rot: it.rot || 0
+        name: it.name || '', x: it.x, y: it.y, scale: it.scale || 1, rot: it.rot || 0,
+        mount: it.mount ? { part: it.mount.part, dx: it.mount.dx || 0, dy: it.mount.dy || 0 } : null
       };
     });
   }
@@ -2395,6 +2898,9 @@
         name: String(raw.name || '').slice(0, 8),
         x: clampPct(raw.x), y: clampPct(raw.y), scale: clampScale(raw.scale), rot: clampRot(raw.rot)
       };
+      // v1.10.0：恢复挂载信息（部位 id 非法时丢弃，回退为自由摆放）
+      var mp = raw.mount && mountPartId(raw.mount.part);
+      if (mp) it.mount = { part: mp, dx: clampMountOff(raw.mount.dx), dy: clampMountOff(raw.mount.dy) };
       if (it.t === 'img') {
         var img = new Image();
         img.onload = function () { repaint(); rebuildStickerList(); };
@@ -2487,12 +2993,14 @@
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'st-chip' + (it.uid === S.selSticker ? ' active' : '');
-      b.title = (it.name || '贴纸') + ' · 第 ' + (i + 1) + ' 层（由底到顶）';
+      var mountDef = it.mount ? partDef(it.mount.part) : null;
+      b.title = (it.name || '贴纸') + ' · 第 ' + (i + 1) + ' 层（由底到顶）'
+        + (mountDef ? ' · 已挂载：' + mountDef.label : '');
       var cv = thumbCanvas(44);
       drawStickerThumbOf(cv.getContext('2d'), it, 44);
       b.appendChild(cv);
       var lab = document.createElement('span');
-      lab.textContent = it.name || '贴纸';
+      lab.textContent = (mountDef ? '📌' : '') + (it.name || '贴纸');
       b.appendChild(lab);
       b.onclick = function () { selectSticker(it.uid); };
       stEl.list.appendChild(b);
@@ -2505,12 +3013,29 @@
     stEl.ctl.classList.toggle('hidden', !it);
     if (!it) return;
     stEl.name.textContent = it.name || '贴纸';
-    stEl.x.value = Math.round(it.x);
-    stEl.y.value = Math.round(it.y);
+    var m = it.mount, def = m ? partDef(m.part) : null;
+    // 挂载式：显示偏移滑杆；自由式：显示画布位置滑杆
+    if (stEl.xItem) stEl.xItem.classList.toggle('hidden', !!m);
+    if (stEl.yItem) stEl.yItem.classList.toggle('hidden', !!m);
+    if (stEl.dxItem) stEl.dxItem.classList.toggle('hidden', !m);
+    if (stEl.dyItem) stEl.dyItem.classList.toggle('hidden', !m);
+    if (stEl.mount) {
+      if (stEl.mount.value !== (m ? m.part : '')) stEl.mount.value = m ? m.part : '';
+      stEl.mountVal.textContent = def ? def.label : '自由摆放';
+    }
+    if (m) {
+      stEl.dx.value = m.dx || 0;
+      stEl.dy.value = m.dy || 0;
+      stEl.dxVal.textContent = String(m.dx || 0);
+      stEl.dyVal.textContent = String(m.dy || 0);
+    } else {
+      stEl.x.value = Math.round(it.x);
+      stEl.y.value = Math.round(it.y);
+      stEl.xVal.textContent = Math.round(it.x) + '%';
+      stEl.yVal.textContent = Math.round(it.y) + '%';
+    }
     stEl.scale.value = it.scale || 1;
     stEl.rot.value = Math.round(it.rot || 0);
-    stEl.xVal.textContent = Math.round(it.x) + '%';
-    stEl.yVal.textContent = Math.round(it.y) + '%';
     stEl.scaleVal.textContent = (it.scale || 1).toFixed(2) + '×';
     stEl.rotVal.textContent = Math.round(it.rot || 0) + '°';
   }
@@ -2522,8 +3047,30 @@
     stEl.name = document.getElementById('stickerSelName');
     stEl.x = document.getElementById('stX'); stEl.xVal = document.getElementById('stXVal');
     stEl.y = document.getElementById('stY'); stEl.yVal = document.getElementById('stYVal');
+    stEl.xItem = document.getElementById('stXItem'); stEl.yItem = document.getElementById('stYItem');
+    stEl.dx = document.getElementById('stDx'); stEl.dxVal = document.getElementById('stDxVal');
+    stEl.dy = document.getElementById('stDy'); stEl.dyVal = document.getElementById('stDyVal');
+    stEl.dxItem = document.getElementById('stDxItem'); stEl.dyItem = document.getElementById('stDyItem');
+    stEl.mount = document.getElementById('stMount'); stEl.mountVal = document.getElementById('stMountVal');
     stEl.scale = document.getElementById('stScale'); stEl.scaleVal = document.getElementById('stScaleVal');
     stEl.rot = document.getElementById('stRot'); stEl.rotVal = document.getElementById('stRotVal');
+
+    // 挂载部位下拉：自由摆放 + 全部可选部位
+    if (stEl.mount) {
+      var optFree = document.createElement('option');
+      optFree.value = ''; optFree.textContent = '自由摆放（画布坐标）';
+      stEl.mount.appendChild(optFree);
+      PART_DEFS.forEach(function (d) {
+        var o = document.createElement('option');
+        o.value = d.id; o.textContent = d.label;
+        stEl.mount.appendChild(o);
+      });
+      stEl.mount.addEventListener('change', function () {
+        var it = selStickerItem();
+        if (!it) return;
+        setStickerMount(it, stEl.mount.value);
+      });
+    }
 
     stEl.file.onchange = function () {
       var f = stEl.file.files && stEl.file.files[0];
@@ -2544,6 +3091,18 @@
       });
       input.addEventListener('change', function () { saveStickersSoon(); });
     });
+    // 挂载偏移滑杆（v1.10.0）
+    [['dx', 'dx'], ['dy', 'dy']].forEach(function (pair) {
+      var input = stEl[pair[0]];
+      input.addEventListener('input', function () {
+        var it = selStickerItem();
+        if (!it || !it.mount) return;
+        it.mount[pair[1]] = clampMountOff(input.value);
+        syncStickerCtl();
+        repaint();
+      });
+      input.addEventListener('change', function () { saveStickersSoon(); });
+    });
     document.getElementById('stickerDeselect').onclick = function () { selectSticker(null); };
     document.getElementById('stickerDelete').onclick = deleteSelectedSticker;
     document.getElementById('stickerClear').onclick = clearStickers;
@@ -2553,10 +3112,7 @@
   }
 
   /* ---------------- 贴纸画板（32 × 32） ---------------- */
-  var SE_COLORS = [
-    ['#9ff7e4', '青'], ['#f2ffff', '白'], ['#ff5a4e', '红'], ['#ff9bd3', '粉'], ['#ffd75e', '黄'],
-    ['#6fcbff', '蓝'], ['#8ef58e', '绿'], ['#ffa14a', '橙'], ['#c9a2ff', '紫'], ['#1a1d20', '黑']
-  ];
+  var SE_COLORS = GRID_PALETTE;   // v1.9.1：与表情画板共用 20 色板
   var SE_W = 32, SE_H = 32, SE_CELL = 15;
   var SE = { W: SE_W, H: SE_H, cells: [], color: SE_COLORS[0][0], tool: 'pen', size: 1, mirror: false, undo: [], drawing: false, last: null };
   var seEl = {};
@@ -2570,18 +3126,25 @@
     seEl.sizeWrap = document.getElementById('seSize');
     seEl.palette = document.getElementById('seColors');
     seEl.mirror = document.getElementById('seMirror');
+    seEl.custom = document.getElementById('seCustom');
+    seEl.colorInput = document.getElementById('seColor');
+    seEl.screen = document.getElementById('seScreen');
+    seEl.hex = document.getElementById('seHex');
+    seEl.hexVal = document.getElementById('seHexVal');
 
     SE_COLORS.forEach(function (pair) {
       var sw = document.createElement('button');
       sw.type = 'button'; sw.className = 'fe-sw'; sw.dataset.c = pair[0];
       sw.style.setProperty('--c', pair[0]); sw.title = pair[1];
-      sw.onclick = function () {
-        SE.color = pair[0];
-        if (SE.tool === 'eraser') SE.tool = 'pen';
-        seSyncTools();
-      };
+      sw.onclick = function () { seApplyColor(pair[0], true); };
       seEl.palette.appendChild(sw);
     });
+    seEl.custom.onclick = function () {
+      seEl.colorInput.value = seCurrentHex();
+      seEl.colorInput.click();
+    };
+    seEl.colorInput.addEventListener('input', function () { seApplyColor(seEl.colorInput.value, true); });
+    seEl.screen.onclick = function () { screenPickColor(function (hex) { seApplyColor(hex, false); }); };
     [].forEach.call(seEl.tools.querySelectorAll('.fe-tool'), function (b) {
       b.onclick = function () { SE.tool = b.dataset.tool; seSyncTools(); };
     });
@@ -2594,6 +3157,12 @@
       var p = gridCellAt(seEl.canvas, e, SE_W, SE_H);
       if (!p) return;
       e.preventDefault();
+      if (SE.tool === 'pick') {                      // v1.9.1：画板吸管
+        var got = gridPickCell(SE, p[0], p[1]);
+        if (got) { seSyncTools(); toast('已拾取颜色 ' + got); }
+        else toast('这一格是透明的，换一格再吸');
+        return;
+      }
       seEl.canvas.setPointerCapture(e.pointerId);
       gridPushUndo(SE);
       if (SE.tool === 'fill') {
@@ -2649,6 +3218,18 @@
     [].forEach.call(seEl.palette.children, function (b) {
       b.classList.toggle('active', b.dataset.c === SE.color);
     });
+    if (seEl.hex) {
+      seEl.hex.style.setProperty('--c', seCurrentHex());
+      seEl.hexVal.textContent = seCurrentHex();
+    }
+  }
+  function seCurrentHex() { return isHexColor(SE.color) ? SE.color : SE_COLORS[0][0]; }
+  function seApplyColor(hex, quiet) {
+    SE.color = gridSafeColor(hex, SE_COLORS[0][0]);
+    if (SE.tool === 'eraser' || SE.tool === 'pick') SE.tool = 'pen';
+    if (seEl.colorInput) seEl.colorInput.value = SE.color;
+    seSyncTools();
+    if (!quiet) toast('已取到颜色 ' + SE.color);
   }
 
   function openStickerEditor() {
@@ -2659,6 +3240,7 @@
     SE.drawing = false; SE.last = null;
     if (!seEl.modal) seBind();
     seEl.name.value = '';
+    seEl.colorInput.value = SE.color;
     seEl.mirror.checked = false;
     seEl.modal.classList.remove('hidden');
     seSyncTools();
@@ -3250,12 +3832,14 @@
     function hitSticker(cx, cy) {
       for (var i = S.stickerItems.length - 1; i >= 0; i--) {   // 顶层优先
         var it = S.stickerItems[i];
-        var dx = cx - it.x / 100 * BASE, dy = cy - it.y / 100 * BASE;
+        var xf = stickerXform(it);   // v1.10.0：挂载式贴纸按部位锚点 + 偏移命中
+        var dx = cx - xf[0], dy = cy - xf[1];
         var box = stickerBoxUnit(it);
-        var a = -(it.rot || 0) * Math.PI / 180;
+        var a = -xf[2] * Math.PI / 180;
         var ca = Math.cos(a), sa = Math.sin(a);
         var lx = dx * ca - dy * sa, ly = dx * sa + dy * ca;   // 反向旋转到贴纸本地坐标
-        if (Math.abs(lx) <= box[0] * 1.08 && Math.abs(ly) <= box[1] * 1.08) return it;
+        var m = box[0] * xf[3] * 1.08, n = box[1] * xf[3] * 1.08;
+        if (Math.abs(lx) <= m && Math.abs(ly) <= n) return it;
       }
       return null;
     }
@@ -3268,13 +3852,15 @@
         e.preventDefault();
         selectSticker(hit.uid);
         mode = 'sticker';
-        offX = p[0] - hit.x / 100 * BASE;
-        offY = p[1] - hit.y / 100 * BASE;
+        var hf = stickerXform(hit);   // v1.10.0：挂载式按当前投影中心算抓取偏移
+        offX = p[0] - hf[0];
+        offY = p[1] - hf[1];
         stage.setPointerCapture(e.pointerId);
         return;
       }
       if (S.selSticker) selectSticker(null);
       if (!isProc()) { repaint(); return; }
+      kfExitView();   // v1.11.0：拖动身体 / 肢体前退出时间轴查看，IK 调整即时可见
       pendingPart = hitPart(p[0], p[1]);
       var limb = hitLimb(p[0], p[1]);
       if (limb) {
@@ -3297,8 +3883,15 @@
         var it = selStickerItem();
         if (!it) return;
         var p = toCanvas(e);
-        it.x = clampPct((p[0] - offX) / BASE * 100);
-        it.y = clampPct((p[1] - offY) / BASE * 100);
+        if (it.mount) {
+          // v1.10.0：挂载式拖动 = 调整相对部位锚点的偏移（贴纸仍钉在部位上）
+          var base = stickerMountBase(it) || [0, 0];
+          it.mount.dx = clampMountOff(p[0] - offX - base[0]);
+          it.mount.dy = clampMountOff(p[1] - offY - base[1]);
+        } else {
+          it.x = clampPct((p[0] - offX) / BASE * 100);
+          it.y = clampPct((p[1] - offY) / BASE * 100);
+        }
         syncStickerCtl();
         repaint();
         return;
@@ -3365,6 +3958,7 @@
   function activateTab(id) {
     var t = document.querySelector('.tab[data-tab="' + id + '"]');
     if (!t) return;
+    if (id !== 'mo') kfExitView();   // v1.11.0：切离「动作」页即退出时间轴查看，回当前骨骼所见即所得
     [].forEach.call(document.querySelectorAll('.tab'), function (x) { x.classList.remove('active'); });
     t.classList.add('active');
     [].forEach.call(document.querySelectorAll('.tab-body'), function (b) { b.classList.add('hidden'); });
@@ -3407,6 +4001,8 @@
     setActive(document.getElementById('textColor'), '#ffffff');
     setPose(S.pose); setFace(S.face); setBg(S.bg);
     S.anim = animClone(); syncAnimUI();
+    KF.frames = []; KF.playing = false; KF.viewT = null;   // v1.11.0：关键帧时间轴一并清空（「我的动作」库保留）
+    stopKfLoop(); kfSave(); syncKfUI();
     applySkinBase(SKIN_OFFICIAL.head, null, true);   // v1.5.0：配色一并还原官方
     stickerChanged();
   };
@@ -3490,6 +4086,7 @@
     fillAnimFace2();
     animEl.play.onclick = function () {
       S.anim.playing = !S.anim.playing;
+      if (S.anim.playing) kfExitView();   // v1.11.0：与关键帧动画互斥
       saveAnim(); syncAnimUI(); repaint();
     };
     function bind(input, fn) {
@@ -3508,6 +4105,333 @@
       saveAnim(); repaint();
     });
     syncAnimUI();
+  }
+
+  /* ---------------- 动作面板（v1.11.0：关键帧时间轴） ---------------- */
+  var kfEl = {};
+  function buildKfThumb(f) {   // 关键帧缩略：透明底小图，直观看出每帧姿势
+    var cv = thumbCanvas(60), c = cv.getContext('2d');
+    c.save(); c.scale(60 / BASE, 60 / BASE);
+    renderProcedural(c, BASE, 60 / BASE, f.rig);
+    c.restore();
+    return cv;
+  }
+  function syncKfHead() {   // 只更新播放头滑杆（播放循环里逐帧调用，不重建列表）
+    if (!kfEl.head) return;
+    var dur = kfDur();
+    kfEl.head.max = String(Math.max(dur, 0.1));
+    if (KF.viewT != null) {
+      kfEl.head.value = String(Math.min(KF.viewT, dur));
+      kfEl.headVal.textContent = KF.viewT.toFixed(2) + 's';
+    } else {
+      kfEl.headVal.textContent = '—';
+    }
+  }
+  function rebuildKfList() {   // 关键帧列表：时刻编辑 + 缩略 + 载入 / 更新 / 删除
+    var box = kfEl.list;
+    if (!box) return;
+    box.innerHTML = '';
+    if (!KF.frames.length) {
+      var tip = document.createElement('p');
+      tip.className = 'kf-empty';
+      tip.textContent = '时间轴还是空的：点一个动作预设，或在「骨骼」页摆好姿势后点「打关键帧」。';
+      box.appendChild(tip);
+      return;
+    }
+    KF.frames.forEach(function (f, i) {
+      var row = document.createElement('div'); row.className = 'kf-row';
+      var tIn = document.createElement('input');
+      tIn.type = 'number'; tIn.className = 'kf-t'; tIn.value = f.t.toFixed(2);
+      tIn.min = '0'; tIn.max = '30'; tIn.step = '0.05'; tIn.title = '关键帧时刻（秒）';
+      tIn.addEventListener('change', function () {
+        var v = Math.max(0, Math.min(30, parseFloat(tIn.value)));
+        if (isNaN(v)) { tIn.value = f.t.toFixed(2); return; }
+        f.t = Math.round(v * 100) / 100;
+        kfSortSave(); syncKfUI(); repaint();
+      });
+      row.appendChild(tIn);
+      var thumb = document.createElement('span'); thumb.className = 'kf-thumb';
+      thumb.appendChild(buildKfThumb(f));
+      row.appendChild(thumb);
+      var tag = document.createElement('span');
+      tag.className = 'kf-tag';
+      tag.textContent = i === 0 ? '首帧' : (i === KF.frames.length - 1 ? '末帧' : '#' + (i + 1));
+      row.appendChild(tag);
+      var bLoad = document.createElement('button');
+      bLoad.type = 'button'; bLoad.className = 'btn ghost sticker-mini'; bLoad.textContent = '⇥ 载入到骨骼';
+      bLoad.title = '把这一帧的姿势载入当前骨骼，去「骨骼」页或画布上继续微调';
+      bLoad.onclick = function () {
+        S.rig = rigClone(f.rig);
+        KF.playing = false; KF.viewT = null; stopKfLoop();
+        syncRigUI(); syncKfUI(); repaint();
+        toast('已载入 ' + f.t.toFixed(2) + 's 帧姿势到骨骼');
+      };
+      row.appendChild(bLoad);
+      var bUpd = document.createElement('button');
+      bUpd.type = 'button'; bUpd.className = 'btn ghost sticker-mini'; bUpd.textContent = '⟳ 更新';
+      bUpd.title = '用当前骨骼姿势覆盖这一帧';
+      bUpd.onclick = function () {
+        f.rig = rigClone(S.rig || REST_RIG);
+        kfSave(); syncKfUI();
+        toast('已用当前骨骼更新 ' + f.t.toFixed(2) + 's 处的关键帧');
+      };
+      row.appendChild(bUpd);
+      var bDel = document.createElement('button');
+      bDel.type = 'button'; bDel.className = 'btn ghost sticker-mini kf-del'; bDel.textContent = '✕';
+      bDel.title = '删除这一帧';
+      bDel.onclick = function () {
+        KF.frames.splice(KF.frames.indexOf(f), 1);
+        if (KF.frames.length < 2) { KF.playing = false; if (KF.frames.length === 0) KF.viewT = null; }
+        kfSave(); syncKfUI(); repaint();
+        toast('已删除 ' + f.t.toFixed(2) + 's 处的关键帧');
+      };
+      row.appendChild(bDel);
+      box.appendChild(row);
+    });
+  }
+  function rebuildKfSavedUI() {   // 「我的动作」库 chips：点选载入，✕ 删除
+    var box = kfEl.saved;
+    if (!box) return;
+    box.innerHTML = '';
+    if (!kfSaved.length) {
+      var tip = document.createElement('span');
+      tip.className = 'kf-empty';
+      tip.textContent = '还没有保存的动作，串好时间轴后命名保存即可复用。';
+      box.appendChild(tip);
+      return;
+    }
+    kfSaved.forEach(function (rec) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.textContent = rec.name;
+      b.title = '载入「' + rec.name + '」（' + rec.frames.length + ' 帧 · ' +
+        (rec.frames[rec.frames.length - 1].t - rec.frames[0].t).toFixed(1) + 's）';
+      b.onclick = function () { kfLoadFrames(rec.frames, rec.name); };
+      var x = document.createElement('i');
+      x.className = 'chip-del'; x.textContent = '✕'; x.title = '删除「' + rec.name + '」';
+      x.onclick = function (e) {
+        e.stopPropagation();
+        kfSaved.splice(kfSaved.indexOf(rec), 1);
+        persistKfSaved(); rebuildKfSavedUI(); rebuildKfAppendSel();
+        toast('已删除动作「' + rec.name + '」');
+      };
+      b.appendChild(x);
+      box.appendChild(b);
+    });
+  }
+  function rebuildKfAppendSel() {   // 串联源：7 款预设 + 我的动作
+    var sel = kfEl.appendSel;
+    if (!sel) return;
+    sel.innerHTML = '';
+    KF_PRESETS.forEach(function (p) {
+      var o = document.createElement('option'); o.value = 'p:' + p.id; o.textContent = '预设 · ' + p.label;
+      sel.appendChild(o);
+    });
+    kfSaved.forEach(function (rec, i) {
+      var o = document.createElement('option'); o.value = 's:' + i; o.textContent = '我的 · ' + rec.name;
+      sel.appendChild(o);
+    });
+  }
+  function kfAppendSource() {   // 解析串联下拉的 value → 关键帧数组副本
+    var v = kfEl.appendSel.value, m = /^([ps]):(.+)$/.exec(v);
+    if (!m) return null;
+    if (m[1] === 'p') {
+      for (var i = 0; i < KF_PRESETS.length; i++) if (KF_PRESETS[i].id === m[2]) return KF_PRESETS[i];
+    } else {
+      var rec = kfSaved[+m[2]];
+      if (rec) return { label: rec.name, frames: rec.frames };
+    }
+    return null;
+  }
+  function syncKfUI() {
+    if (!kfEl.play) return;
+    var has = kfActive();
+    kfEl.play.textContent = KF.playing ? '⏸ 暂停' : '▶ 播放预览';
+    kfEl.play.disabled = !has;
+    kfEl.stop.disabled = !KF.playing && KF.viewT == null;
+    kfEl.status.textContent = !KF.frames.length ? '时间轴为空'
+      : (!has ? '只有 1 帧，再打一帧即可播放'
+        : (KF.playing ? '循环播放中 · ' : '已暂停 · ') + KF.frames.length + ' 帧 · ' + kfDur().toFixed(1) + 's 循环');
+    kfEl.add.disabled = false;
+    kfEl.clear.disabled = !KF.frames.length;
+    kfEl.gif.disabled = !has;
+    kfEl.apng.disabled = !has;
+    kfEl.export.disabled = !KF.frames.length;
+    kfEl.head.disabled = !has;
+    syncKfHead();
+    rebuildKfList();
+    rebuildKfAppendSel();
+    rebuildKfSavedUI();
+  }
+  function buildKfUI() {
+    kfEl.play = document.getElementById('kfPlay');
+    kfEl.stop = document.getElementById('kfStop');
+    kfEl.status = document.getElementById('kfStatus');
+    kfEl.head = document.getElementById('kfHead');
+    kfEl.headVal = document.getElementById('kfHeadVal');
+    kfEl.add = document.getElementById('kfAdd');
+    kfEl.clear = document.getElementById('kfClear');
+    kfEl.list = document.getElementById('kfList');
+    kfEl.presetBox = document.getElementById('kfPresets');
+    kfEl.appendSel = document.getElementById('kfAppendSel');
+    kfEl.append = document.getElementById('kfAppend');
+    kfEl.name = document.getElementById('kfName');
+    kfEl.save = document.getElementById('kfSaveBtn');
+    kfEl.saved = document.getElementById('kfSaved');
+    kfEl.export = document.getElementById('kfExport');
+    kfEl.import = document.getElementById('kfImport');
+    kfEl.file = document.getElementById('kfFile');
+    kfEl.gif = document.getElementById('kfGif');
+    kfEl.apng = document.getElementById('kfApng');
+
+    kfEl.play.onclick = function () {
+      if (!kfActive()) { toast('至少需要 2 个关键帧才能播放'); return; }
+      KF.playing = !KF.playing;
+      if (KF.playing) kfPauseLoopAnim();   // 与循环动画互斥
+      if (!KF.playing) stopKfLoop();
+      syncKfUI(); repaint();
+    };
+    kfEl.stop.onclick = function () { kfExitView(); };   // 回到当前骨骼静态
+    kfEl.head.addEventListener('input', function () {   // 播放头拖动 = 暂停并定位
+      if (!kfActive()) return;
+      KF.playing = false; stopKfLoop();
+      KF.viewT = Math.max(0, Math.min(kfDur(), parseFloat(kfEl.head.value) || 0));
+      syncKfHead();
+      renderKfView(stageCtx, BASE, true, KF.viewT);
+      kfEl.play.textContent = '▶ 播放预览';
+      kfEl.stop.disabled = false;
+    });
+    kfEl.add.onclick = function () { kfAddFrame(); };
+    kfEl.clear.onclick = function () {   // 清空 = 二次确认（危险操作）
+      if (!KF.frames.length) return;
+      if (!kfEl.clear._confirm) {
+        kfEl.clear._confirm = true; kfEl.clear.textContent = '再点一次确认清空';
+        setTimeout(function () { kfEl.clear._confirm = false; kfEl.clear.textContent = '↺ 清空时间轴'; }, 2500);
+        return;
+      }
+      kfEl.clear._confirm = false; kfEl.clear.textContent = '↺ 清空时间轴';
+      KF.frames = []; KF.playing = false; KF.viewT = null; stopKfLoop();
+      kfSave(); syncKfUI(); repaint();
+      toast('时间轴已清空（「我的动作」库不受影响）');
+    };
+    KF_PRESETS.forEach(function (p) {   // 预设 chips：点选载入
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.textContent = p.label;
+      b.title = '载入预设「' + p.label + '」（' + p.frames.length + ' 帧 · ' +
+        (p.frames[p.frames.length - 1].t - p.frames[0].t).toFixed(1) + 's）';
+      b.onclick = function () { kfLoadFrames(p.frames, p.label); };
+      kfEl.presetBox.appendChild(b);
+    });
+    kfEl.append.onclick = function () {   // 多段串联：追加后直接播放
+      var src = kfAppendSource();
+      if (!src) { toast('请选择要串联的动作'); return; }
+      kfAppendFrames(src.frames, src.label);
+    };
+    kfEl.save.onclick = function () { saveKfNamed(kfEl.name.value, KF.frames); };
+    kfEl.name.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') saveKfNamed(kfEl.name.value, KF.frames);
+    });
+    kfEl.export.onclick = function () {   // 动作 JSON 导出（含名称，可分享）
+      if (!KF.frames.length) { toast('时间轴上还没有关键帧'); return; }
+      var data = { v: 1, name: kfEl.name.value.trim() || '我的动作', frames: kfSanitize(KF.frames) };
+      download(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }),
+        'TRAE宝-动作-' + data.name + '.json');
+      toast('动作已导出（' + KF.frames.length + ' 帧）');
+    };
+    kfEl.import.onclick = function () { kfEl.file.click(); };
+    kfEl.file.addEventListener('change', function () {
+      if (!this.files || !this.files[0]) return;
+      var file = this.files[0];
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var data = JSON.parse(fr.result);
+          var fs = data && data.frames;
+          if (!Array.isArray(fs) || fs.length < 2) { toast('动作文件格式不对：需要至少 2 个关键帧'); return; }
+          var ok = kfSanitize(fs);
+          if (ok.length < 2) { toast('动作文件里没有有效的关键帧'); return; }
+          kfLoadFrames(ok, data.name || '导入动作');
+        } catch (err) {
+          toast('动作导入失败：' + (err && err.message || err));
+        }
+      };
+      fr.readAsText(file);
+      this.value = '';
+    });
+    kfEl.gif.onclick = function () { exportKfGif(this); };
+    kfEl.apng.onclick = function () { exportKfApng(this); };
+    syncKfUI();
+  }
+
+  /* ---- 关键帧动图导出：GIF（兼容性）/ APNG（全彩无损） ---- */
+  function kfSamplePlan() {   // 采样计划：12fps 起步，8~48 帧钳制，与循环时长对齐
+    var dur = kfDur();
+    var n = Math.max(8, Math.min(48, Math.round(dur * 12)));
+    return { n: n, dur: dur, delayMs: Math.max(20, Math.round(dur * 1000 / n / 10) * 10) };
+  }
+  function exportKfGif(btn) {
+    if (!window.TraeGif) { toast('GIF 编码器未加载，请检查 js/gif-encoder.js'); return; }
+    var size = parseInt(document.getElementById('exportSize').value, 10);
+    var plan = kfSamplePlan();
+    btn.disabled = true;
+    toast('正在采集 ' + plan.n + ' 帧关键帧动画…');
+    setTimeout(function () {
+      try {
+        var frames = [];
+        for (var i = 0; i < plan.n; i++) {
+          var cv = document.createElement('canvas');
+          cv.width = cv.height = size;
+          var c2 = cv.getContext('2d');
+          renderKfView(c2, size, false, i / plan.n * plan.dur);
+          frames.push({ data: c2.getImageData(0, 0, size, size).data });
+        }
+        window.TraeGif.encode({
+          width: size, height: size, delayMs: plan.delayMs, frames: frames,
+          onProgress: function (p) { toast('GIF 编码中… ' + Math.round(p * 100) + '%'); }
+        }).then(function (blob) {
+          btn.disabled = false;
+          download(blob, 'TRAE宝-动作-' + S.pose + '-' + S.face + '.gif');
+          toast('GIF 已导出（' + plan.n + ' 帧 · ' + Math.round(blob.size / 1024) + 'KB）');
+        }).catch(function () {
+          btn.disabled = false;
+          toast('GIF 编码失败，请重试');
+        });
+      } catch (err) {
+        btn.disabled = false;
+        toast('GIF 导出失败：' + (err && err.message || err));
+      }
+    }, 30);
+  }
+  function exportKfApng(btn) {
+    if (!window.TraeApng) { toast('APNG 编码器未加载，请检查 js/apng-encoder.js'); return; }
+    var size = parseInt(document.getElementById('exportSize').value, 10);
+    var plan = kfSamplePlan();
+    btn.disabled = true;
+    toast('正在采集 ' + plan.n + ' 帧关键帧动画…');
+    setTimeout(function () {
+      try {
+        var frames = [];
+        for (var i = 0; i < plan.n; i++) {
+          var cv = document.createElement('canvas');
+          cv.width = cv.height = size;
+          renderKfView(cv.getContext('2d'), size, false, i / plan.n * plan.dur);
+          frames.push(cv);
+        }
+        window.TraeApng.encode({
+          width: size, height: size, delayMs: plan.delayMs, frames: frames,
+          onProgress: function (p) { toast('APNG 编码中… ' + Math.round(p * 100) + '%'); }
+        }).then(function (blob) {
+          btn.disabled = false;
+          download(blob, 'TRAE宝-动作-' + S.face + '.png');
+          toast('APNG 已导出（' + plan.n + ' 帧 · ' + Math.round(blob.size / 1024) + 'KB）');
+        }).catch(function () {
+          btn.disabled = false;
+          toast('APNG 编码失败，请重试');
+        });
+      } catch (err) {
+        btn.disabled = false;
+        toast('APNG 导出失败：' + (err && err.message || err));
+      }
+    }, 30);
   }
 
   /* ---------------- 导出 ---------------- */
@@ -3580,9 +4504,11 @@
     next();
   };
 
-  /* ---------------- GIF 动图导出（v1.4.0） ---------------- */
+  /* ---------------- GIF 动图导出（v1.4.0；v1.11.0 起关键帧优先） ---------------- */
   var GIF_FRAMES = 16;
   document.getElementById('btnGif').onclick = function () {
+    // v1.11.0：时间轴上有动作时导出关键帧动画，否则保持循环动画导出
+    if (kfActive()) { exportKfGif(this); return; }
     var a = S.anim;
     if (!(a.breath > 0 || a.sway > 0 || a.walk > 0 || a.switchOn)) {
       toast('请先在「动画」页打开呼吸、摇摆、四肢摆动或表情切换');
@@ -3663,7 +4589,7 @@
 
   /* ---------------- 启动 ---------------- */
   // 调试/高级用法句柄
-  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, parts: { defs: PART_DEFS, select: selectPart, hit: hitPart, reset: function () { S.parts = createPartStates(); syncPartUI(); repaint(); } }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, skin: { presets: SKIN_PRESETS, official: SKIN_OFFICIAL, setBase: applySkinBase, mix: skinMix, state: function () { return S.skin; } }, body: { rest: BODY_REST, defs: BODY_SLIDER_DEFS, presets: BODY_PRESETS, saved: function () { return bodySaved.slice(); }, state: function () { return bodyClone(S.body); }, set: function (f, label) { S.body = bodySanitize(bodyClone(f)); bodyChanged(label); }, apply: applyBody }, ik: { defs: IK_DEFS, pos: ikPos, solve: ikSolve, hit: hitLimb, state: function () { return { drag: ikDrag, hover: ikHover && ikHover.id }; } }, dbg3d: { buildSkeleton: buildSkeleton, updateSkeletonMatrices: updateSkeletonMatrices, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mS: mS, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
+  window.__traeEmoji = { S: S, repaint: repaint, exportCanvas: exportCanvas, stickers: { add: addBuiltinSticker, remove: deleteSelectedSticker, select: selectSticker, clear: clearStickers }, parts: { defs: PART_DEFS, select: selectPart, hit: hitPart, reset: function () { S.parts = createPartStates(); syncPartUI(); repaint(); } }, FACES: FACES, setFace: setFace, setPose: setPose, setBg: setBg, faceEdit: { edits: function () { return FACE_EDITS; }, open: openFaceEditor, cells: faceCellsOf, bright: faceBright, canvas: getFaceCanvas }, skin: { presets: SKIN_PRESETS, official: SKIN_OFFICIAL, setBase: applySkinBase, mix: skinMix, state: function () { return S.skin; } }, body: { rest: BODY_REST, defs: BODY_SLIDER_DEFS, presets: BODY_PRESETS, saved: function () { return bodySaved.slice(); }, state: function () { return bodyClone(S.body); }, set: function (f, label) { S.body = bodySanitize(bodyClone(f)); bodyChanged(label); }, apply: applyBody }, ik: { defs: IK_DEFS, pos: ikPos, solve: ikSolve, hit: hitLimb, state: function () { return { drag: ikDrag, hover: ikHover && ikHover.id }; } }, kf: { presets: KF_PRESETS, frames: function () { return KF.frames; }, rigAt: kfRigAt, load: kfLoadFrames, append: kfAppendFrames, dur: kfDur, saved: function () { return kfSaved; }, state: function () { return { playing: KF.playing, viewT: KF.viewT }; } }, dbg3d: { buildSkeleton: buildSkeleton, updateSkeletonMatrices: updateSkeletonMatrices, projectV: projectV, GEO3D: GEO3D, applyM: applyM, mIdent0: mIdent0, mMul: mMul, mT: mT, mS: mS, mRX: mRX, mRY: mRY, mRZ: mRZ, V3: V3, CAM: CAM, FACE_DEFS: FACE_DEFS, rotOnly: rotOnly, shadeHex: shadeHex, LIGHT: LIGHT } };
   function init() {
     feBind();
     seBind();
@@ -3685,6 +4611,9 @@
     loadCustomBg();
     loadAnim();        // v1.4.0：恢复本机保存的动画设置
     buildAnimUI();
+    kfLoad();          // v1.11.0：恢复本机保存的关键帧时间轴（默认不自动播放）
+    loadKfSaved();
+    buildKfUI();
     repaint();
   }
   init();

@@ -6,7 +6,7 @@
 <title>TRAE宝表情工厂 · TRAE宝表情包，由你来画</title>
 <meta name="description" content="基于 TRAE宝 角色三特征的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23d7fcae'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/style.css?v=26">
+<link rel="stylesheet" href="css/style.css?v=30">
 </head>
 <body>
 <header class="site-header">
@@ -58,6 +58,7 @@
       <button class="tab" data-tab="text" role="tab" type="button">文字</button>
       <button class="tab" data-tab="sticker" role="tab" type="button">贴纸</button>
       <button class="tab" data-tab="anim" role="tab" type="button">动画</button>
+      <button class="tab" data-tab="mo" role="tab" type="button">动作</button>
     </div>
 
     <div class="tab-body" id="tab-pose">
@@ -66,7 +67,7 @@
     </div>
 
     <div class="tab-body hidden" id="tab-face">
-      <h3 class="group-title">屏幕表情 <small>24 款内置像素表情，也可以自己画</small></h3>
+      <h3 class="group-title">屏幕表情 <small>24 款内置像素表情，任意一款都能二次创作</small></h3>
       <div class="option-grid" id="faceGrid"></div>
     </div>
 
@@ -205,21 +206,33 @@
       <div class="option-grid" id="stickerGrid"></div>
       <input id="stickerFile" type="file" accept="image/*" hidden>
 
-      <h3 class="group-title">画布贴纸 <small>直接在预览画布拖动即可移动</small></h3>
+      <h3 class="group-title">画布贴纸 <small>拖动移动；挂载到部位后随姿势 / 动画一起动</small></h3>
       <div class="sticker-list" id="stickerList"></div>
       <div id="stickerCtl" class="sticker-ctl hidden">
         <div class="sticker-ctl-head">
           <span id="stickerSelName">贴纸</span>
           <button id="stickerDeselect" class="btn ghost sticker-mini" type="button">取消选择</button>
         </div>
+        <div class="st-mount-row">
+          <label><span>挂载部位</span><b id="stMountVal">自由摆放</b></label>
+          <select id="stMount"></select>
+        </div>
         <div class="rig-grid">
-          <div class="rig-item">
+          <div class="rig-item" id="stXItem">
             <label><span>水平位置</span><b id="stXVal">50%</b></label>
             <input id="stX" type="range" min="0" max="100" step="1" value="50">
           </div>
-          <div class="rig-item">
+          <div class="rig-item" id="stYItem">
             <label><span>垂直位置</span><b id="stYVal">50%</b></label>
             <input id="stY" type="range" min="0" max="100" step="1" value="50">
+          </div>
+          <div class="rig-item hidden" id="stDxItem">
+            <label><span>水平偏移</span><b id="stDxVal">0</b></label>
+            <input id="stDx" type="range" min="-260" max="260" step="1" value="0">
+          </div>
+          <div class="rig-item hidden" id="stDyItem">
+            <label><span>垂直偏移</span><b id="stDyVal">0</b></label>
+            <input id="stDy" type="range" min="-260" max="260" step="1" value="0">
           </div>
           <div class="rig-item">
             <label><span>大小</span><b id="stScaleVal">1.00×</b></label>
@@ -240,15 +253,15 @@
           <button id="stickerDelete" class="btn ghost sticker-mini" type="button">删除这张</button>
           <button id="stickerClear" class="btn ghost sticker-mini" type="button">清空全部</button>
         </div>
-        <p class="fe-tip">图层顺序：列表从左到右 = 由底到顶；导出按同一顺序绘制，选中框不会出现在导出图里。</p>
+        <p class="fe-tip">挂载后贴纸钉在所选部位上（每个部位同时一张，重复挂载会替换旧的）；肢体摆动、播放动画或捏体型时贴纸跟着走。切回「自由摆放」即卸下，贴纸原地保留。</p>
       </div>
     </div>
 
     <div class="tab-body hidden" id="tab-anim">
       <h3 class="group-title">循环动画 <small>预览与 GIF 导出共用同一套动画</small></h3>
       <div class="anim-head">
-        <button id="animPlay" class="btn" type="button">⏸ 暂停预览</button>
-        <span id="animStatus" class="anim-status">循环播放中</span>
+        <button id="animPlay" class="btn" type="button">▶ 播放预览</button>
+        <span id="animStatus" class="anim-status">已暂停</span>
       </div>
       <div class="rig-grid">
         <div class="rig-item">
@@ -274,7 +287,56 @@
       <div class="field">
         <select id="animFace2" aria-label="第二表情"></select>
       </div>
-      <p class="fe-tip">导出 GIF：16 帧无限循环，帧率按周期自动换算；建议选 480 尺寸，文件更小、聊天里更流畅。PNG 导出的始终是静态姿势，不受动画影响。</p>
+      <p class="fe-tip">导出 GIF：16 帧无限循环，帧率按周期自动换算；建议选 480 尺寸，文件更小、聊天里更流畅。PNG 导出的始终是静态姿势，不受动画影响。v1.11.0 起「动作」页时间轴有关键帧时，GIF 按钮优先导出关键帧动画。</p>
+    </div>
+
+    <div class="tab-body hidden" id="tab-mo">
+      <h3 class="group-title">关键帧时间轴 <small>把「骨骼」页摆好的姿势串成连续动作</small></h3>
+      <div class="anim-head">
+        <button id="kfPlay" class="btn" type="button" disabled>▶ 播放预览</button>
+        <button id="kfStop" class="btn ghost" type="button" disabled>⏹ 回到骨骼</button>
+        <span id="kfStatus" class="anim-status">时间轴为空</span>
+      </div>
+      <div class="rig-grid">
+        <div class="rig-item">
+          <label><span>播放头（拖动预览任意时刻）</span><b id="kfHeadVal">—</b></label>
+          <input id="kfHead" type="range" min="0" max="1" step="0.01" value="0" disabled>
+        </div>
+      </div>
+      <div class="part-actions">
+        <button id="kfAdd" class="btn" type="button" title="用当前骨骼姿势在播放头时刻记录一帧">＋ 打关键帧</button>
+        <button id="kfClear" class="btn ghost" type="button" disabled>↺ 清空时间轴</button>
+      </div>
+      <div class="kf-list" id="kfList"></div>
+
+      <h3 class="group-title">动作预设 <small>点选载入；要串联多段就用下面的「追加」</small></h3>
+      <div class="chips" id="kfPresets"></div>
+      <div class="kf-append-row">
+        <select id="kfAppendSel" aria-label="选择要串联的动作"></select>
+        <button id="kfAppend" class="btn ghost" type="button" title="把所选动作的关键帧整体接在时间轴末尾，接完自动播放">⤵ 追加到末尾</button>
+      </div>
+
+      <h3 class="group-title">我的动作 <small>命名保存当前时间轴，载入 / 串联 / 分享都方便</small></h3>
+      <div class="body-save-row">
+        <input id="kfName" type="text" maxlength="12" placeholder="动作名称，如：我的鬼步舞" autocomplete="off">
+        <button id="kfSaveBtn" class="btn" type="button">保存当前动作</button>
+      </div>
+      <div class="chips" id="kfSaved"></div>
+      <div class="part-actions">
+        <button id="kfExport" class="btn ghost" type="button" disabled>⬇ 导出动作</button>
+        <button id="kfImport" class="btn ghost" type="button">⬆ 导入动作</button>
+        <input id="kfFile" type="file" accept="application/json,.json" hidden>
+      </div>
+
+      <h3 class="group-title">导出动图 <small>按时间轴循环采样；APNG 全彩无损，GIF 兼容性最好</small></h3>
+      <div class="part-actions">
+        <button id="kfGif" class="btn" type="button" disabled>🎬 导出 GIF</button>
+        <button id="kfApng" class="btn" type="button" disabled>🖼 导出 APNG</button>
+      </div>
+      <p class="fe-tip">工作流：在「骨骼」页（或画布拖拽）摆好姿势 → 回这里「＋ 打关键帧」→ 重复或追加预设 → ▶ 播放预览。
+        帧与帧之间自动平滑过渡；首尾姿势相同时循环最顺滑。挂载式贴纸、文字与背景会随动画一起进入导出。
+        动图按时间轴 12fps 采样（8~48 帧）；APNG 无限循环、颜色无损，推荐 480 尺寸。
+        载入预设 / 导入动作会切换到站立姿势（预设动作基于站立设计）；时间轴与「我的动作」都存在本机浏览器。</p>
     </div>
 
     <h3 class="group-title preset-title">一键套系 <small>按官方示例场景配好全套</small></h3>
@@ -301,6 +363,7 @@
           <button type="button" class="fe-tool active" data-tool="pen">✏️ 画笔</button>
           <button type="button" class="fe-tool" data-tool="eraser">◻ 橡皮</button>
           <button type="button" class="fe-tool" data-tool="fill">🪣 填充</button>
+          <button type="button" class="fe-tool" data-tool="pick" title="吸管：拾取画板已有像素的颜色">💧 吸管</button>
           <span class="fe-sizes" id="feSize">
             <button type="button" class="fe-size active" data-s="1">1px</button>
             <button type="button" class="fe-size" data-s="2">2px</button>
@@ -310,6 +373,10 @@
         </div>
         <div class="fe-bar">
           <div class="fe-colors" id="feColors"></div>
+          <button id="feCustom" class="fe-tool" type="button" title="打开系统调色板，自定义画笔颜色">🎨 自定义颜色</button>
+          <button id="feScreen" class="fe-tool" type="button" title="从屏幕任意位置取色（需浏览器支持 EyeDropper）">🖥 屏幕取色</button>
+          <span id="feHex" class="fe-hex" title="当前画笔颜色"><i></i><b id="feHexVal">#9ff7e4</b></span>
+          <input id="feColor" class="fe-color-input" type="color" value="#9ff7e4">
         </div>
         <div class="fe-bar">
           <button id="feUndo" class="btn ghost" type="button">↶ 撤销</button>
@@ -325,9 +392,12 @@
         <label class="fe-field">发光色
           <select id="feGlow"></select>
         </label>
+        <label class="fe-field fe-range">眼睛亮度 <b id="feBrightVal">100%</b>
+          <input id="feBright" type="range" min="40" max="160" step="5" value="100" aria-label="眼睛亮度">
+        </label>
         <button id="feSave" class="btn primary" type="button">保存并使用</button>
         <button id="feDelete" class="btn ghost hidden" type="button">删除这个表情</button>
-        <p class="fe-tip">画板 40 × 28 就是屏幕的真实像素；保存后存在本机浏览器，刷新/重开页面都还在。</p>
+        <p class="fe-tip">画板 40 × 28 就是屏幕的真实像素；内置表情也能这样二次创作（改名 / 调眼睛亮度 / 改像素），随时可「还原官方表情」。改动存在本机浏览器，刷新/重开页面都还在。</p>
       </aside>
     </div>
   </div>
@@ -346,6 +416,7 @@
           <button type="button" class="fe-tool active" data-tool="pen">✏️ 画笔</button>
           <button type="button" class="fe-tool" data-tool="eraser">◻ 橡皮</button>
           <button type="button" class="fe-tool" data-tool="fill">🪣 填充</button>
+          <button type="button" class="fe-tool" data-tool="pick" title="吸管：拾取画板已有像素的颜色">💧 吸管</button>
           <span class="fe-sizes" id="seSize">
             <button type="button" class="fe-size active" data-s="1">1px</button>
             <button type="button" class="fe-size" data-s="2">2px</button>
@@ -355,6 +426,10 @@
         </div>
         <div class="fe-bar">
           <div class="fe-colors" id="seColors"></div>
+          <button id="seCustom" class="fe-tool" type="button" title="打开系统调色板，自定义画笔颜色">🎨 自定义颜色</button>
+          <button id="seScreen" class="fe-tool" type="button" title="从屏幕任意位置取色（需浏览器支持 EyeDropper）">🖥 屏幕取色</button>
+          <span id="seHex" class="fe-hex" title="当前画笔颜色"><i></i><b id="seHexVal">#9ff7e4</b></span>
+          <input id="seColor" class="fe-color-input" type="color" value="#9ff7e4">
         </div>
         <div class="fe-bar">
           <button id="seUndo" class="btn ghost" type="button">↶ 撤销</button>
@@ -377,6 +452,7 @@
 
 <script src="js/assets.js?v=12"></script>
 <script src="js/gif-encoder.js?v=1"></script>
-<script src="js/app.js?v=31"></script>
+<script src="js/apng-encoder.js?v=2"></script>
+<script src="js/app.js?v=37"></script>
 </body>
 </html>

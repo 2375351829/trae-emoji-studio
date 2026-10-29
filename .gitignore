@@ -2,6 +2,9 @@
 .screenshots/
 .trae-html-share-packages/
 
+# 预热物料（图片 / 视频 / 探针图约 190MB，仅本地留存）
+06-预热物料-promo-kit/
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db
