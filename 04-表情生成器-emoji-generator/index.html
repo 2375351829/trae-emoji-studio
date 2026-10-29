@@ -6,7 +6,7 @@
 <title>TRAE宝表情工厂 · TRAE宝表情包，由你来画</title>
 <meta name="description" content="基于 TRAE宝 角色三特征的定制表情生成器：调表情、换动作、配背景、加文字，一键导出 1:1 表情图。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23d7fcae'/%3E%3Crect x='6' y='8' width='20' height='14' rx='2' fill='%23232a2e'/%3E%3Crect x='9' y='11' width='14' height='8' fill='%230e1418'/%3E%3Cpath d='M12 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3Cpath d='M20 13l3 3-3 3-3-3z' fill='%2373f99a'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/style.css?v=30">
+<link rel="stylesheet" href="css/style.css?v=31">
 </head>
 <body>
 <header class="site-header">
@@ -29,19 +29,22 @@
     <div class="canvas-holder">
       <canvas id="stage" width="1024" height="1024"></canvas>
       <div id="bgChecker" class="checker" aria-hidden="true"></div>
+      <div id="stageHint" class="stage-hint" aria-hidden="true"><b>拖动角色</b> · 360° 转身</div>
     </div>
     <div class="preview-toolbar">
-      <div class="export-group">
+      <div class="export-row">
         <select id="exportSize" aria-label="导出尺寸">
           <option value="1024" selected>1024 × 1024</option>
           <option value="720">720 × 720</option>
           <option value="480">480 × 480</option>
         </select>
         <button id="btnDownload" class="btn primary" type="button">⬇ 下载表情</button>
-        <button id="btnCopy" class="btn" type="button">⧉ 复制图片</button>
       </div>
-      <button id="btnBatch" class="btn ghost" type="button">📦 导出套系（8 张）</button>
-      <button id="btnGif" class="btn ghost" type="button">🎬 导出 GIF</button>
+      <div class="export-row">
+        <button id="btnCopy" class="btn ghost" type="button">⧉ 复制图片</button>
+        <button id="btnBatch" class="btn ghost" type="button">📦 导出套系（8 张）</button>
+        <button id="btnGif" class="btn ghost" type="button">🎬 导出 GIF</button>
+      </div>
     </div>
   </section>
 
@@ -73,8 +76,9 @@
 
     <div class="tab-body hidden" id="tab-rig">
       <h3 class="group-title">骨骼摆动 <small>实时驱动 3D 手绘模型（官方渲染姿势不适用）</small></h3>
-      <p class="rig-tip">💡 直接在预览画布上<b>拖动身体</b>可整体转身；<b>拖动手 / 脚 / 头</b>会按 IK 反解关节，
-        滑杆数值自动同步回填——滑杆与拖拽可任意混用。</p>
+      <p class="rig-tip">💡 直接在预览画布上<b>左右拖动身体</b>可连续 360° 转身（松开后仍停在新角度）；
+        <b>上下拖动</b>只做轻微前倾 / 后仰，方向与鼠标一致且不会翻倒；
+        <b>拖动手 / 脚 / 头</b>会按 IK 反解关节，滑杆数值自动同步回填——滑杆与拖拽可任意混用。</p>
       <div class="rig-grid" id="rigSliders"></div>
       <button id="btnRigZero" class="btn ghost rig-zero" type="button">↺ 关节归零</button>
     </div>
@@ -453,6 +457,6 @@
 <script src="js/assets.js?v=12"></script>
 <script src="js/gif-encoder.js?v=1"></script>
 <script src="js/apng-encoder.js?v=2"></script>
-<script src="js/app.js?v=37"></script>
+<script src="js/app.js?v=38"></script>
 </body>
 </html>

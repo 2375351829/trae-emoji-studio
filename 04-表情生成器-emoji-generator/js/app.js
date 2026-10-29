@@ -738,7 +738,9 @@
       leg(1, rig.rLegFront, rig.rLegSide),
       // 躯干实体保持在原来的收集顺序末尾；根节点已承担部位变换，这里不再重复叠加。
       { part: 'torso', noAdj: true, pos: [0, 0, 0], rot: [0, 0, 0],
-        boxes: [{ s: [g.torsoW / 2, g.torsoH / 2, g.torsoD / 2], o: [0, g.torsoOy, 0], col: P.torso }] }
+        // v1.12.0：躯干面之间改用面色描边（edge:'self'），去掉内部深色拼缝，
+        // 整块读作实心不透明机身，不再像多块玻璃板叠在一起
+        boxes: [{ s: [g.torsoW / 2, g.torsoH / 2, g.torsoD / 2], o: [0, g.torsoOy, 0], col: P.torso, edge: 'self' }] }
     ];
     var nodes = {};
     (function mapNodes(node) {
@@ -1086,9 +1088,9 @@
     { key: 'leg', label: '腿部' },
     { key: 'bezel', label: '屏幕边框' }
   ];
-  // 官方外壳配色：以头色为基准，其余部位保持官方明度关系（躯干 .82 / 手臂 .80 / 腿 .86 / 边框 .92）
-  var SKIN_OFFICIAL = { head: '#373834', torso: '#2d2e2b', arm: '#2c2d2a', leg: '#2f302d', bezel: '#33342f' };
-  var SKIN_RATIO = { head: 1, torso: .82, arm: .80, leg: .86, bezel: .92 };
+  // 官方外壳配色（v1.12.0：手臂明度 .80 → 1.04，略亮于躯干，站立垂手时也能读出独立手臂轮廓）
+  var SKIN_OFFICIAL = { head: '#373834', torso: '#2d2e2b', arm: '#3a3b37', leg: '#2f302d', bezel: '#33342f' };
+  var SKIN_RATIO = { head: 1, torso: .82, arm: 1.04, leg: .86, bezel: .92 };
   var SKIN_PRESETS = [
     { id: 'official', label: '官方炭灰', base: '#373834' },
     { id: 'snow', label: '纯白', base: '#f1f1ec' },
@@ -3341,14 +3343,18 @@
   }
 
   /* ---------------- 骨骼滑杆与画布拖拽 ---------------- */
+  // v1.12.0：身体左右转放开到 ±180°（画布拖动可连续 360° 转身）；
+  // 前后倾仍保持 ±25°，只做轻微俯仰，禁止把角色上下翻倒
   var RIG_DEFS = [
-    ['bodyYaw', '身体 · 左右转', -50, 50], ['bodyPitch', '身体 · 前后倾', -25, 25], ['bodyRoll', '身体 · 侧倾', -20, 20],
+    ['bodyYaw', '身体 · 左右转', -180, 180], ['bodyPitch', '身体 · 前后倾', -25, 25], ['bodyRoll', '身体 · 侧倾', -20, 20],
     ['headYaw', '头 · 左右转', -40, 40], ['headPitch', '头 · 点头', -25, 25],
     ['lArmSide', '左臂 · 侧摆', 0, 170], ['lArmFront', '左臂 · 前后摆', -70, 70],
     ['rArmSide', '右臂 · 侧摆', 0, 170], ['rArmFront', '右臂 · 前后摆', -70, 70],
     ['lLegSide', '左腿 · 侧摆', 0, 60], ['lLegFront', '左腿 · 前后摆', -45, 45],
     ['rLegSide', '右腿 · 侧摆', 0, 60], ['rLegFront', '右腿 · 前后摆', -45, 45]
   ];
+  // 角度归一到 (-180, 180]，供 360° 连续转身与滑杆回填共用
+  function wrapDeg(a) { a = (a + 180) % 360; if (a < 0) a += 360; return a - 180; }
   var rigInputs = {};
   function buildRigUI() {
     var grid = document.getElementById('rigSliders');
@@ -3381,6 +3387,7 @@
     var rig = S.rig || REST_RIG;
     RIG_DEFS.forEach(function (d) {
       var v = rig[d[0]] || 0;
+      if (d[0] === 'bodyYaw') v = wrapDeg(v);   // v1.12.0：360° 转身后滑杆回填到等效角度
       rigInputs[d[0]].input.value = v;
       rigInputs[d[0]].val.textContent = Math.round(v) + '°';
     });
@@ -3825,6 +3832,10 @@
   (function drag() {
     var mode = null, lx = 0, ly = 0, offX = 0, offY = 0;
     var pendingPart = null, moved = false, downX = 0, downY = 0;
+    var stageHint = document.getElementById('stageHint');
+    function hideStageHint() {
+      if (stageHint && !stageHint.classList.contains('hide')) stageHint.classList.add('hide');
+    }
     function toCanvas(e) {
       var r = stage.getBoundingClientRect();
       return [(e.clientX - r.left) / r.width * BASE, (e.clientY - r.top) / r.height * BASE];
@@ -3898,10 +3909,12 @@
       }
       if (mode === 'limb') {
         var d = ikDrag.def;
-        if (d.kind === 'head') {   // 头：朝向增量（与身体拖动同一套手感，夹在点头范围内）
+        hideStageHint();
+        if (d.kind === 'head') {   // 头：朝向增量（上下拖动与身体同一方向，不做反转）
           if (!S.rig) S.rig = rigClone(REST_RIG);
           S.rig.headYaw = clampNum((S.rig.headYaw || 0) + (e.clientX - lx) * 0.3, -40, 40);
-          S.rig.headPitch = clampNum((S.rig.headPitch || 0) + (e.clientY - ly) * 0.22, -25, 25);
+          // v1.12.0：上下拖动方向修正（往下拖 = 低头，往上拖 = 抬头），范围 ±25° 不会翻倒
+          S.rig.headPitch = clampNum((S.rig.headPitch || 0) - (e.clientY - ly) * 0.22, -25, 25);
           lx = e.clientX; ly = e.clientY;
         } else {
           var q = toCanvas(e);
@@ -3913,8 +3926,11 @@
       }
       if (mode === 'body') {
         if (!S.rig) S.rig = rigClone(REST_RIG);
-        S.rig.bodyYaw = Math.max(-50, Math.min(50, S.rig.bodyYaw + (e.clientX - lx) * 0.35));
-        S.rig.bodyPitch = Math.max(-25, Math.min(25, S.rig.bodyPitch + (e.clientY - ly) * 0.25));
+        hideStageHint();
+        // v1.12.0：左右拖动 = 连续 360° 转身（按 ±180 归一，转身手感不中断）；
+        // 上下拖动只做轻微前倾 / 后仰，方向与鼠标一致（向下拖 = 低头前倾），±25° 内禁止翻倒
+        S.rig.bodyYaw = wrapDeg((S.rig.bodyYaw || 0) + (e.clientX - lx) * 0.35);
+        S.rig.bodyPitch = Math.max(-25, Math.min(25, (S.rig.bodyPitch || 0) - (e.clientY - ly) * 0.25));
         lx = e.clientX; ly = e.clientY;
         syncRigUI();
         repaint();
